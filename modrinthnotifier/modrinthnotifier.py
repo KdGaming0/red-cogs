@@ -164,7 +164,7 @@ class ModrinthNotifier(commands.Cog):
             log.error(f"Failed to send initial notification for {project_id}: {e}")
             await channel.send(f"✅ Added **{project_name}** to monitoring (could not fetch initial version: {e})")
 
-    # Background Tasks (same as before)
+    # Background Tasks
 
     @tasks.loop(minutes=1)
     async def update_checker(self):
@@ -565,8 +565,6 @@ class ModrinthNotifier(commands.Cog):
 
         await ctx.send(f"✅ Removed **{project_name}** (`{project_id}`) from all monitoring.")
 
-    # Keep existing commands (addrole, removerole, channel, defaultrole, etc.) with modifications for multi-channel support
-
     @modrinth.command(name="channel")
     @commands.admin_or_permissions(manage_guild=True)
     async def set_channel(self, ctx, channel: discord.TextChannel):
@@ -639,7 +637,7 @@ class ModrinthNotifier(commands.Cog):
         status = "enabled" if config.enabled else "disabled"
         await ctx.send(f"✅ Server notifications {status}.")
 
-    # User Commands (updated to support filters)
+    # User Commands
 
     @modrinth.group(name="user", aliases=["personal"])
     async def user_commands(self, ctx):
@@ -757,8 +755,6 @@ class ModrinthNotifier(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    # Keep existing user commands (channel, dm, toggle, settings)
-
     @user_commands.command(name="channel")
     async def user_channel(self, ctx, channel: discord.TextChannel):
         """Set private channel for notifications (if accessible)."""
@@ -822,7 +818,7 @@ class ModrinthNotifier(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    # General Commands (updated for multi-channel support)
+    # General Commands
 
     @modrinth.command(name="list")
     async def list_projects(self, ctx):
@@ -899,4 +895,45 @@ class ModrinthNotifier(commands.Cog):
                 await ctx.send(f"❌ Error checking project: {e}")
 
     @modrinth.command(name="settings")
-    @commands.admin_or_permissions
+    @commands.admin_or_permissions(manage_guild=True)
+    async def show_settings(self, ctx):
+        """Display current server configuration."""
+        config = self._get_guild_config(ctx.guild.id)
+
+        embed = discord.Embed(
+            title="Server Settings",
+            color=discord.Color.blue()
+        )
+
+        # Status
+        status = "✅ Enabled" if config.enabled else "❌ Disabled"
+        embed.add_field(name="Status", value=status, inline=True)
+
+        # Legacy channel
+        if config.channel_id:
+            channel = ctx.guild.get_channel(config.channel_id)
+            channel_name = channel.mention if channel else "Invalid Channel"
+        else:
+            channel_name = "Not Set"
+        embed.add_field(name="Legacy Channel", value=channel_name, inline=True)
+
+        # Interval
+        embed.add_field(name="Check Interval", value=f"{config.check_interval} minutes", inline=True)
+
+        # Default roles
+        default_roles = [ctx.guild.get_role(rid) for rid in config.default_role_ids]
+        default_roles = [role for role in default_roles if role]
+        roles_text = format_role_list(default_roles)
+        embed.add_field(name="Default Roles", value=roles_text, inline=False)
+
+        # Project count
+        embed.add_field(name="Projects", value=str(len(config.projects)), inline=True)
+
+        # Last check
+        if config.last_check:
+            last_check = format_time_ago(config.last_check)
+        else:
+            last_check = "Never"
+        embed.add_field(name="Last Check", value=last_check, inline=True)
+
+        await ctx.send(embed=embed)
