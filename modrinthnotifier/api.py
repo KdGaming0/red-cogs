@@ -191,3 +191,51 @@ class ModrinthAPI:
         except Exception as e:
             log.error(f"Error fetching all versions for {project_id}: {e}")
             raise ModrinthAPIError(f"Failed to fetch all versions: {e}")
+
+    async def get_latest_supported_minecraft_version(self, project_id: str) -> Optional[str]:
+        """Get the latest Minecraft version supported by this project across ALL release channels."""
+        try:
+            all_versions = await self.get_all_project_versions(project_id)
+
+            if not all_versions:
+                return None
+
+            # Sort versions by date (newest first) and collect all game versions
+            all_versions.sort(key=lambda v: v.date_published, reverse=True)
+
+            # Get all unique game versions from all releases
+            all_game_versions = set()
+            for version in all_versions:
+                all_game_versions.update(version.game_versions)
+
+            # Sort game versions to find the latest
+            if not all_game_versions:
+                return None
+
+            # Convert to list and sort (this handles version comparison)
+            game_versions_list = sorted(list(all_game_versions), reverse=True, key=self._version_sort_key)
+
+            return game_versions_list[0] if game_versions_list else None
+
+        except Exception as e:
+            log.error(f"Error getting latest supported MC version for {project_id}: {e}")
+            return None
+
+    def _version_sort_key(self, version: str) -> tuple:
+        """Create a sort key for Minecraft versions."""
+        try:
+            # Handle versions like "1.21.4", "1.21", "24w10a", etc.
+            if version.startswith("24w") or version.startswith("23w") or version.startswith("22w"):
+                # Snapshot versions - put them after releases
+                year = int(version[:2])
+                week = int(version[3:5])
+                return (year, week, 1)  # 1 for snapshot
+            else:
+                # Regular versions
+                parts = version.split('.')
+                # Pad with zeros to handle different lengths
+                padded = [int(p) for p in parts] + [0] * (4 - len(parts))
+                return tuple(padded + [0])  # 0 for release
+        except (ValueError, IndexError):
+            # Fallback for unusual version formats
+            return (0, 0, 0, 0, 2)

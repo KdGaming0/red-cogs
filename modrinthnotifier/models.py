@@ -108,6 +108,7 @@ class ChannelMonitor:
     required_version_types: Optional[List[str]] = None
     last_version: Optional[str] = None
     added_at: float = field(default_factory=lambda: datetime.utcnow().timestamp())
+    use_latest_supported: bool = False  # New field for latest supported MC version
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage."""
@@ -118,7 +119,8 @@ class ChannelMonitor:
             "required_game_versions": self.required_game_versions,
             "required_version_types": self.required_version_types,
             "last_version": self.last_version,
-            "added_at": self.added_at
+            "added_at": self.added_at,
+            "use_latest_supported": self.use_latest_supported
         }
 
     @classmethod
@@ -131,7 +133,8 @@ class ChannelMonitor:
             required_game_versions=data.get("required_game_versions"),
             required_version_types=data.get("required_version_types"),
             last_version=data.get("last_version"),
-            added_at=data.get("added_at", datetime.utcnow().timestamp())
+            added_at=data.get("added_at", datetime.utcnow().timestamp()),
+            use_latest_supported=data.get("use_latest_supported", False)
         )
 
 @dataclass
