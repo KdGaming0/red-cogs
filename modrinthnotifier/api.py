@@ -1,63 +1,59 @@
-"""Modrinth API wrapper with rate limiting and error handling."""
+"""Enhanced Modrinth API client with search functionality."""
 
-import aiohttp
 import asyncio
 import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
+
+import aiohttp
+
 from .models import ProjectInfo, VersionInfo
 
 log = logging.getLogger("red.modrinthnotifier.api")
 
-
 class RateLimiter:
-    """Simple rate limiter for API requests."""
+    """Rate limiter for Modrinth API requests."""
 
-    def __init__(self, max_requests: int = 250, window: int = 60):
+    def __init__(self, max_requests: int = 300, window: int = 60):
         self.max_requests = max_requests
         self.window = window
-        self.requests = []
+        self.requests: List[float] = []
         self._lock = asyncio.Lock()
 
     async def acquire(self):
-        """Wait if necessary to respect rate limits."""
+        """Acquire permission to make a request."""
         async with self._lock:
-            now = datetime.utcnow()
-            # Remove old requests outside the window
-            self.requests = [req_time for req_time in self.requests
-                             if now - req_time < timedelta(seconds=self.window)]
+            now = datetime.utcnow().timestamp()
 
+            # Remove requests outside the window
+            self.requests = [req for req in self.requests if now - req < self.window]
+
+            # Check if we can make a request
             if len(self.requests) >= self.max_requests:
-                # Calculate wait time
-                oldest_request = min(self.requests)
-                wait_time = (oldest_request + timedelta(seconds=self.window) - now).total_seconds()
+                wait_time = self.window - (now - self.requests[0])
                 if wait_time > 0:
                     log.info(f"Rate limit reached, waiting {wait_time:.2f} seconds")
                     await asyncio.sleep(wait_time)
 
             self.requests.append(now)
 
-
 class ModrinthAPIError(Exception):
     """Base exception for Modrinth API errors."""
     pass
-
 
 class ProjectNotFoundError(ModrinthAPIError):
     """Raised when a project is not found."""
     pass
 
-
 class RateLimitError(ModrinthAPIError):
     """Raised when rate limited."""
     pass
 
-
 class ModrinthAPI:
-    """Modrinth API client with rate limiting and error handling."""
+    """Enhanced Modrinth API client with search functionality."""
 
     BASE_URL = "https://api.modrinth.com/v2"
-    USER_AGENT = "KdGaming0/ModrinthNotifier/1.0.0 (Discord Bot)"
+    USER_AGENT = "KdGaming0/ModrinthNotifier/2.0.0 (Discord Bot)"
 
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
@@ -99,13 +95,11 @@ class ModrinthAPI:
                     elif response.status == 404:
                         raise ProjectNotFoundError(f"Project not found: {endpoint}")
                     elif response.status == 429:
-                        # Rate limited, wait and retry
                         retry_after = int(response.headers.get("Retry-After", 60))
                         log.warning(f"Rate limited, waiting {retry_after} seconds")
                         await asyncio.sleep(retry_after)
                         continue
                     elif response.status >= 500:
-                        # Server error, retry with exponential backoff
                         if attempt < retries - 1:
                             wait_time = 2 ** attempt
                             log.warning(f"Server error {response.status}, retrying in {wait_time}s")
@@ -127,44 +121,61 @@ class ModrinthAPI:
 
         raise ModrinthAPIError("Max retries exceeded")
 
+    async def search_projects(self, query: str, limit: int = 10,
+                            project_type: Optional[str] = None) -> List[ProjectInfo]:
+        """Search for projects on Modrinth."""
+        params = {
+            "query": query,
+            "limit": limit,
+            "facets": []
+        }
+
+        if project_type:
+            params["facets"].append(f'[["project_type:{project_type}"]]')
+
+        # Convert facets to JSON string if any
+        if params["facets"]:
+            params["facets"] = f'[{",".join(params["facets"])}]'
+        else:
+            del params["facets"]
+
+        try:
+            data = await self._make_request("/search", params)
+            return [ProjectInfo.from_api_data(hit) for hit in data.get("hits", [])]
+        except Exception as e:
+            log.error(f"Error searching projects: {e}")
+            raise ModrinthAPIError(f"Search failed: {e}")
+
     async def get_project(self, project_id: str) -> ProjectInfo:
         """Get project information by ID or slug."""
-        data = await self._make_request(f"/project/{project_id}")
-        return ProjectInfo.from_api_data(data)
-
-    async def get_projects(self, project_ids: List[str]) -> List[ProjectInfo]:
-        """Get multiple projects by IDs."""
-        if not project_ids:
-            return []
-
-        # Modrinth supports batch requests with comma-separated IDs
-        ids_param = ",".join(project_ids)
-        data = await self._make_request("/projects", params={"ids": f'["{ids_param}"]'})
-
-        if isinstance(data, list):
-            return [ProjectInfo.from_api_data(item) for item in data]
-        else:
-            # Single project returned as object
-            return [ProjectInfo.from_api_data(data)]
-
-    async def get_project_versions(self, project_id: str, limit: int = 10) -> List[VersionInfo]:
-        """Get versions for a project."""
-        params = {"limit": limit}
-        data = await self._make_request(f"/project/{project_id}/version", params=params)
-        return [VersionInfo.from_api_data(version) for version in data]
-
-    async def get_version(self, version_id: str) -> VersionInfo:
-        """Get specific version information."""
-        data = await self._make_request(f"/version/{version_id}")
-        return VersionInfo.from_api_data(data)
-
-    async def get_latest_version(self, project_id: str) -> Optional[VersionInfo]:
-        """Get the latest version for a project."""
         try:
-            versions = await self.get_project_versions(project_id, limit=1)
-            return versions[0] if versions else None
+            data = await self._make_request(f"/project/{project_id}")
+            return ProjectInfo.from_api_data(data)
         except ProjectNotFoundError:
-            return None
+            raise
+        except Exception as e:
+            log.error(f"Error fetching project {project_id}: {e}")
+            raise ModrinthAPIError(f"Failed to fetch project: {e}")
+
+    async def get_project_versions(self, project_id: str, limit: int = 50,
+                                 loaders: Optional[List[str]] = None,
+                                 game_versions: Optional[List[str]] = None) -> List[VersionInfo]:
+        """Get versions for a project with optional filtering."""
+        params = {"limit": limit}
+
+        if loaders:
+            params["loaders"] = '["' + '","'.join(loaders) + '"]'
+        if game_versions:
+            params["game_versions"] = '["' + '","'.join(game_versions) + '"]'
+
+        try:
+            data = await self._make_request(f"/project/{project_id}/version", params)
+            return [VersionInfo.from_api_data(version) for version in data]
+        except ProjectNotFoundError:
+            raise
+        except Exception as e:
+            log.error(f"Error fetching versions for {project_id}: {e}")
+            raise ModrinthAPIError(f"Failed to fetch versions: {e}")
 
     async def validate_project_id(self, project_id: str) -> Optional[str]:
         """Validate a project ID and return the project name if valid."""
@@ -172,4 +183,6 @@ class ModrinthAPI:
             project = await self.get_project(project_id)
             return project.name
         except ProjectNotFoundError:
+            return None
+        except ModrinthAPIError:
             return None
