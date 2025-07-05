@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union, Any
 import discord
 from redbot.core import commands, Config, checks
-from redbot.core.utils.embed import EmbedBuilder
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from redbot.core.utils.predicates import MessagePredicate
 
@@ -119,8 +118,9 @@ class ModrinthChecker(commands.Cog):
 
         for version in versions:
             # Check minecraft version
-            if mc_versions and not any(mv in version.get('game_versions', []) for mv in mc_versions):
-                continue
+            if mc_versions and mc_versions != "latest_always":
+                if not any(mv in version.get('game_versions', []) for mv in mc_versions):
+                    continue
 
             # Check loader
             if loaders and not any(loader in version.get('loaders', []) for loader in loaders):
@@ -194,7 +194,9 @@ class ModrinthChecker(commands.Cog):
         """Add a Modrinth project to monitor for updates."""
 
         # Get project info
-        project = await self._get_project_info(project_id)
+        async with ctx.typing():
+            project = await self._get_project_info(project_id)
+
         if not project:
             await ctx.send("❌ Project not found. Please check the project ID.")
             return
@@ -487,7 +489,9 @@ class ModrinthChecker(commands.Cog):
     @modrinth.command(name="info")
     async def project_info(self, ctx, project_id: str):
         """Show detailed information about a Modrinth project."""
-        project = await self._get_project_info(project_id)
+        async with ctx.typing():
+            project = await self._get_project_info(project_id)
+
         if not project:
             await ctx.send("❌ Project not found.")
             return
@@ -651,6 +655,89 @@ class ModrinthChecker(commands.Cog):
 
         await ctx.send(embed=embed)
 
+    @modrinth.command(name="editchannel")
+    async def edit_channel(self, ctx, project_identifier: str, channel: discord.TextChannel):
+        """Change the notification channel for a project."""
+        guild_config = await self.config.guild(ctx.guild).all()
+        projects = guild_config['projects']
+
+        # Find project
+        project_id = None
+        if project_identifier in projects:
+            project_id = project_identifier
+        else:
+            for pid, config in projects.items():
+                if config['name'].lower() == project_identifier.lower():
+                    project_id = pid
+                    break
+
+        if not project_id:
+            await ctx.send("❌ Project not found.")
+            return
+
+        # Update channel
+        async with self.config.guild(ctx.guild).projects() as projects_config:
+            projects_config[project_id]['discord_channel'] = channel.id
+
+        project_name = projects[project_id]['name']
+        await ctx.send(f"✅ Updated notification channel for **{project_name}** to {channel.mention}.")
+
+    @modrinth.command(name="addrole")
+    async def add_role(self, ctx, project_identifier: str, role: discord.Role):
+        """Add a role to ping for a project's notifications."""
+        guild_config = await self.config.guild(ctx.guild).all()
+        projects = guild_config['projects']
+
+        # Find project
+        project_id = None
+        if project_identifier in projects:
+            project_id = project_identifier
+        else:
+            for pid, config in projects.items():
+                if config['name'].lower() == project_identifier.lower():
+                    project_id = pid
+                    break
+
+        if not project_id:
+            await ctx.send("❌ Project not found.")
+            return
+
+        # Add role
+        async with self.config.guild(ctx.guild).projects() as projects_config:
+            if role.id not in projects_config[project_id]['roles']:
+                projects_config[project_id]['roles'].append(role.id)
+
+        project_name = projects[project_id]['name']
+        await ctx.send(f"✅ Added role {role.mention} to **{project_name}** notifications.")
+
+    @modrinth.command(name="removerole")
+    async def remove_role(self, ctx, project_identifier: str, role: discord.Role):
+        """Remove a role from a project's notifications."""
+        guild_config = await self.config.guild(ctx.guild).all()
+        projects = guild_config['projects']
+
+        # Find project
+        project_id = None
+        if project_identifier in projects:
+            project_id = project_identifier
+        else:
+            for pid, config in projects.items():
+                if config['name'].lower() == project_identifier.lower():
+                    project_id = pid
+                    break
+
+        if not project_id:
+            await ctx.send("❌ Project not found.")
+            return
+
+        # Remove role
+        async with self.config.guild(ctx.guild).projects() as projects_config:
+            if role.id in projects_config[project_id]['roles']:
+                projects_config[project_id]['roles'].remove(role.id)
+
+        project_name = projects[project_id]['name']
+        await ctx.send(f"✅ Removed role {role.mention} from **{project_name}** notifications.")
+
     async def background_checker(self):
         """Background task to check for updates."""
         await self.bot.wait_until_ready()
@@ -668,7 +755,7 @@ class ModrinthChecker(commands.Cog):
                         await asyncio.sleep(2)  # Rate limiting
 
                 # Wait for next check cycle
-                await asyncio.sleep(30 * 60)  # 30 minutes
+                await asyncio.sleep(1800)  # 30 minutes
 
             except Exception as e:
                 log.error(f"Error in background checker: {e}")
