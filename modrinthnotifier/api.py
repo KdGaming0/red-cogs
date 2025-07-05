@@ -161,29 +161,40 @@ class ModrinthAPI:
             raise ModrinthAPIError(f"Failed to fetch versions: {e}")
 
     async def get_all_project_versions(self, project_id: str) -> List[VersionInfo]:
-        """Get ALL versions for a project to determine complete support."""
+        """Get ALL versions for a project to determine complete support. Fetches all pages."""
         try:
             all_versions = []
             offset = 0
             limit = 100
+            max_requests = 50  # Safety limit to prevent infinite loops
 
-            while True:
-                data = await self._make_request(f"/project/{project_id}/version", {"limit": limit, "offset": offset})
+            for request_count in range(max_requests):
+                log.info(f"Fetching versions for {project_id}, offset: {offset}, request: {request_count + 1}")
+
+                params = {"limit": limit, "offset": offset}
+                data = await self._make_request(f"/project/{project_id}/version", params)
+
+                if not data:
+                    log.info(f"No data returned for {project_id} at offset {offset}")
+                    break
+
                 versions = [VersionInfo.from_api_data(version) for version in data]
 
                 if not versions:
+                    log.info(f"No versions returned for {project_id} at offset {offset}")
                     break
 
                 all_versions.extend(versions)
+                log.info(f"Fetched {len(versions)} versions, total: {len(all_versions)}")
 
+                # If we got fewer versions than requested, we've reached the end
                 if len(versions) < limit:
+                    log.info(f"Reached end of versions for {project_id}, got {len(versions)} < {limit}")
                     break
 
                 offset += limit
 
-                if len(all_versions) >= 1000:  # Safety limit
-                    break
-
+            log.info(f"Total versions fetched for {project_id}: {len(all_versions)}")
             return all_versions
 
         except ProjectNotFoundError:
@@ -200,9 +211,6 @@ class ModrinthAPI:
             if not all_versions:
                 return None
 
-            # Sort versions by date (newest first) and collect all game versions
-            all_versions.sort(key=lambda v: v.date_published, reverse=True)
-
             # Get all unique game versions from all releases
             all_game_versions = set()
             for version in all_versions:
@@ -215,17 +223,47 @@ class ModrinthAPI:
             # Convert to list and sort (this handles version comparison)
             game_versions_list = sorted(list(all_game_versions), reverse=True, key=self._version_sort_key)
 
-            return game_versions_list[0] if game_versions_list else None
+            latest_version = game_versions_list[0] if game_versions_list else None
+            log.info(f"Latest supported MC version for {project_id}: {latest_version}")
+            return latest_version
 
         except Exception as e:
             log.error(f"Error getting latest supported MC version for {project_id}: {e}")
+            return None
+
+    async def get_current_latest_supported_minecraft_version(self, project_id: str) -> Optional[str]:
+        """Get the current latest Minecraft version the mod supports (at setup time only)."""
+        try:
+            # Get recent versions to find what's currently supported
+            recent_versions = await self.get_project_versions(project_id, limit=20)
+
+            if not recent_versions:
+                return None
+
+            # Get all unique game versions from recent releases
+            current_game_versions = set()
+            for version in recent_versions:
+                current_game_versions.update(version.game_versions)
+
+            if not current_game_versions:
+                return None
+
+            # Convert to list and sort to find the latest
+            game_versions_list = sorted(list(current_game_versions), reverse=True, key=self._version_sort_key)
+
+            current_latest = game_versions_list[0] if game_versions_list else None
+            log.info(f"Current latest supported MC version for {project_id}: {current_latest}")
+            return current_latest
+
+        except Exception as e:
+            log.error(f"Error getting current latest supported MC version for {project_id}: {e}")
             return None
 
     def _version_sort_key(self, version: str) -> tuple:
         """Create a sort key for Minecraft versions."""
         try:
             # Handle versions like "1.21.4", "1.21", "24w10a", etc.
-            if version.startswith("24w") or version.startswith("23w") or version.startswith("22w"):
+            if version.startswith("24w") or version.startswith("23w") or version.startswith("22w") or version.startswith("25w"):
                 # Snapshot versions - put them after releases
                 year = int(version[:2])
                 week = int(version[3:5])

@@ -298,8 +298,9 @@ class ModrinthNotifier(commands.Cog):
                 supported_loaders = sorted(list(supported_loaders))
                 supported_game_versions = sorted(list(supported_game_versions), reverse=True)
 
-                # Also get the latest supported version for the new option
+                # Get both latest versions for different options
                 latest_supported_version = await self.api.get_latest_supported_minecraft_version(selected_project.id)
+                current_latest_version = await self.api.get_current_latest_supported_minecraft_version(selected_project.id)
 
             except ModrinthAPIError as e:
                 await ctx.send(f"❌ Error fetching project details: {e}")
@@ -311,6 +312,7 @@ class ModrinthNotifier(commands.Cog):
             'supported_loaders': supported_loaders,
             'supported_game_versions': supported_game_versions,
             'latest_supported_version': latest_supported_version,
+            'current_latest_version': current_latest_version,
             'step': 'confirm_project',
             'user_id': ctx.author.id,
             'channel_id': ctx.channel.id,
@@ -386,10 +388,11 @@ class ModrinthNotifier(commands.Cog):
 
         supported_versions = session['supported_game_versions']
         latest_supported = session.get('latest_supported_version')
+        current_latest = session.get('current_latest_version')
 
         embed = discord.Embed(
             title="Minecraft Version Filter",
-            description="Which Minecraft versions should be monitored?",
+            description="Choose how to filter Minecraft versions for notifications:",
             color=discord.Color.blue()
         )
 
@@ -405,19 +408,28 @@ class ModrinthNotifier(commands.Cog):
         )
 
         options = [
-            "1️⃣ All supported versions",
-            "2️⃣ Specific versions (you'll specify)",
-            "3️⃣ Latest major version only"
+            "1️⃣ **All supported versions** - Notify for any update regardless of MC version",
+            "2️⃣ **Specific versions** - Choose exact MC versions to monitor",
+            f"3️⃣ **Latest current version only** - Only {current_latest or 'latest'} (fixed at setup time)",
         ]
         reactions = ["1️⃣", "2️⃣", "3️⃣"]
 
         if latest_supported:
-            options.append(f"4️⃣ Latest version supported by mod ({latest_supported})")
+            options.append(f"4️⃣ **Latest version supported by mod** - Always track the newest MC version the mod supports (currently {latest_supported})")
             reactions.append("4️⃣")
 
         embed.add_field(
             name="Options",
             value="\n".join(options),
+            inline=False
+        )
+
+        embed.add_field(
+            name="Explanation",
+            value="• **Option 1**: Gets notified for every update\n"
+                  "• **Option 2**: Only gets notified for updates to specific MC versions\n"
+                  "• **Option 3**: Only gets notified for updates to the current latest MC version\n"
+                  "• **Option 4**: Dynamically tracks the newest MC version the mod supports",
             inline=False
         )
 
@@ -445,8 +457,8 @@ class ModrinthNotifier(commands.Cog):
                 session['use_latest_supported'] = False
                 await ctx.send(f"Please specify the Minecraft versions you want to monitor.\nSupported: {', '.join(supported_versions[:10])}{'...' if len(supported_versions) > 10 else ''}\nFormat: comma-separated or single version (e.g., `{supported_versions[0]}` or `{supported_versions[0]}, {supported_versions[1] if len(supported_versions) > 1 else supported_versions[0]}`):")
             elif str(reaction.emoji) == "3️⃣":
-                latest_version = supported_versions[0] if supported_versions else "1.21"
-                session['minecraft_versions'] = [latest_version]
+                current_version = current_latest or supported_versions[0] if supported_versions else "1.21"
+                session['minecraft_versions'] = [current_version]
                 session['use_latest_supported'] = False
                 await self._ask_loader_type(ctx)
             elif str(reaction.emoji) == "4️⃣" and latest_supported:
@@ -643,7 +655,7 @@ class ModrinthNotifier(commands.Cog):
         await ctx.send(embed=embed)
 
         def check(message):
-            return message.author.id == user_id and message.channel.id == ctx.id
+            return message.author.id == user_id and message.channel.id == ctx.channel.id
 
         try:
             msg = await self.bot.wait_for('message', timeout=60.0, check=check)
@@ -651,7 +663,7 @@ class ModrinthNotifier(commands.Cog):
             session = self._interactive_sessions[user_id]
 
             if msg.content.lower() == 'current':
-                session['notification_channel'] = ctx
+                session['notification_channel'] = ctx.channel
             elif msg.channel_mentions:
                 session['notification_channel'] = msg.channel_mentions[0]
             else:
@@ -685,7 +697,7 @@ class ModrinthNotifier(commands.Cog):
         await ctx.send(embed=embed)
 
         def check(message):
-            return message.author.id == user_id and message.channel.id == ctx.id
+            return message.author.id == user_id and message.channel.id == ctx.channel.id
 
         try:
             msg = await self.bot.wait_for('message', timeout=60.0, check=check)
@@ -754,9 +766,11 @@ class ModrinthNotifier(commands.Cog):
         embed.add_field(name="Roles", value=humanize_list([role.mention for role in session['roles']]) if session['roles'] else "None", inline=True)
 
         if session.get('use_latest_supported'):
-            embed.add_field(name="Minecraft Versions", value="Latest supported by mod", inline=True)
+            embed.add_field(name="Minecraft Versions", value="Latest supported by mod (dynamic)", inline=True)
         elif session.get('minecraft_versions'):
             embed.add_field(name="Minecraft Versions", value=", ".join(session['minecraft_versions']), inline=True)
+        else:
+            embed.add_field(name="Minecraft Versions", value="All supported versions", inline=True)
 
         if session.get('loaders'):
             embed.add_field(name="Loaders", value=", ".join(session['loaders']), inline=True)

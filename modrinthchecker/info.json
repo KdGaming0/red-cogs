@@ -1,0 +1,12 @@
+{
+    "author": ["KdGaming0"],
+    "name": "ModrinthChecker",
+    "short": "Monitor Modrinth projects for updates",
+    "description": "A comprehensive cog to monitor Modrinth projects (mods, modpacks, resource packs, shaders) for updates and send notifications to Discord channels with rich embeds and changelogs.",
+    "install_msg": "Thank you for installing ModrinthChecker! Use `[p]modrinth add <project_id>` to start monitoring a project.",
+    "tags": ["modrinth", "updates", "notifications", "minecraft", "mods"],
+    "requirements": ["aiohttp"],
+    "hidden": false,
+    "end_user_data_statement": "This cog stores project monitoring configurations per guild including project IDs, notification channels, and role mentions. No personal data is stored.",
+    "min_bot_version": "3.5.0"
+}
