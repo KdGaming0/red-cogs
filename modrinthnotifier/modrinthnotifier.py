@@ -1,9 +1,10 @@
 """Main cog file for Modrinth Update Notifier."""
 
 import discord
-from redbot.core import commands, Config, tasks
+from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import box, humanize_list
 from redbot.core.utils.predicates import MessagePredicate
+from discord.ext import tasks
 import asyncio
 import logging
 from typing import Dict, List, Optional, Union
@@ -21,7 +22,6 @@ from .utils import (
 )
 
 log = logging.getLogger("red.modrinthnotifier")
-
 
 class ModrinthNotifier(commands.Cog):
     """Monitor Modrinth projects for updates and send notifications."""
