@@ -220,6 +220,52 @@ class ModrinthNotifier(commands.Cog):
         except Exception as e:
             log.error(f"Error checking user project {project.id}: {e}")
 
+    def _normalize_version(self, version: str) -> str:
+        """Normalize version string for comparison."""
+        # Remove any whitespace and convert to lowercase
+        version = version.strip().lower()
+
+        # Handle common version format variations
+        # Remove 'v' prefix if present
+        if version.startswith('v'):
+            version = version[1:]
+
+        return version
+
+    def _versions_match(self, user_version: str, supported_version: str) -> bool:
+        """Check if user input version matches a supported version with flexible matching."""
+        user_norm = self._normalize_version(user_version)
+        supported_norm = self._normalize_version(supported_version)
+
+        # Exact match
+        if user_norm == supported_norm:
+            return True
+
+        # Try partial matching for common cases
+        # e.g., "1.21" matches "1.21.0", "1.21.1", etc.
+        if user_norm in supported_norm or supported_norm in user_norm:
+            return True
+
+        return False
+
+    def _find_matching_versions(self, user_versions: List[str], supported_versions: List[str]) -> Tuple[List[str], List[str]]:
+        """Find matching versions and return (matched, invalid)."""
+        matched = []
+        invalid = []
+
+        for user_version in user_versions:
+            found_match = False
+            for supported_version in supported_versions:
+                if self._versions_match(user_version, supported_version):
+                    matched.append(supported_version)  # Use the actual supported version
+                    found_match = True
+                    break
+
+            if not found_match:
+                invalid.append(user_version)
+
+        return matched, invalid
+
     # Enhanced Commands
 
     @commands.group(name="modrinth", aliases=["mr"])
@@ -442,7 +488,7 @@ class ModrinthNotifier(commands.Cog):
                 await self._ask_loader_type(ctx)
             elif str(reaction.emoji) == "2️⃣":
                 session['step'] = 'specify_versions'
-                await ctx.send(f"Please specify the Minecraft versions you want to monitor.\n\n**Supported versions:** {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}\n\n**Format:** comma-separated (e.g., `{supported_versions[0]}, {supported_versions[1] if len(supported_versions) > 1 else supported_versions[0]}`)\n**Single version:** just type the version (e.g., `{supported_versions[0]}`)")
+                await ctx.send(f"Please specify the Minecraft versions you want to monitor.\n\n**Supported versions:** {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}\n\n**Format:** comma-separated (e.g., `{supported_versions[0]}, {supported_versions[1] if len(supported_versions) > 1 else supported_versions[0]}`)\n**Single version:** just type the version (e.g., `{supported_versions[0]}`)\n\n**Tip:** You can use partial versions like `1.21` to match all 1.21.x versions.")
             elif str(reaction.emoji) == "3️⃣":
                 # Use the latest version
                 latest_version = supported_versions[0] if supported_versions else "1.21"
@@ -548,7 +594,7 @@ class ModrinthNotifier(commands.Cog):
             version_matches = True
 
             if minecraft_versions:
-                if not any(mc_version in version.game_versions for mc_version in minecraft_versions):
+                if not any(self._versions_match(mc_version, game_version) for mc_version in minecraft_versions for game_version in version.game_versions):
                     version_matches = False
 
             if loaders:
@@ -824,81 +870,103 @@ class ModrinthNotifier(commands.Cog):
 
         # Handle version specification
         if session.get('step') == 'specify_versions':
-            try:
-                # Clean up the input
-                versions_input = message.content.strip()
+            # Clean up the input
+            versions_input = message.content.strip()
 
-                # Handle single version or comma-separated versions
-                if ',' in versions_input:
-                    versions = [v.strip() for v in versions_input.split(',')]
-                else:
-                    versions = [versions_input.strip()]
+            # Log for debugging
+            log.info(f"User {message.author.id} input version: '{versions_input}'")
 
-                # Remove empty strings
-                versions = [v for v in versions if v]
+            # Handle single version or comma-separated versions
+            if ',' in versions_input:
+                user_versions = [v.strip() for v in versions_input.split(',')]
+            else:
+                user_versions = [versions_input.strip()]
 
-                if not versions:
-                    await message.channel.send("❌ Please specify at least one version.")
-                    return
+            # Remove empty strings
+            user_versions = [v for v in user_versions if v]
 
-                supported_versions = session['supported_game_versions']
-
-                # Validate that all specified versions are supported
-                invalid_versions = [v for v in versions if v not in supported_versions]
-                if invalid_versions:
-                    await message.channel.send(
-                        f"❌ **Invalid versions:** {', '.join(invalid_versions)}\n\n**Supported versions:** {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}\n\nPlease try again with supported versions only.")
-                    return
-
-                session['minecraft_versions'] = versions
-                session['step'] = None  # Clear the step
-                await self._ask_loader_type(message.channel)
-                return  # ADD THIS LINE - This was missing!
-
-            except Exception as e:
-                log.error(f"Error processing versions: {e}")
-                await message.channel.send(
-                    "❌ Invalid format. Please use comma-separated versions (e.g., `1.21.4, 1.21.3`) or a single version (e.g., `1.21.4`).")
+            if not user_versions:
+                await message.channel.send("❌ Please specify at least one version.")
                 return
+
+            supported_versions = session['supported_game_versions']
+
+            # Log supported versions for debugging
+            log.info(f"Supported versions: {supported_versions[:10]}")
+
+            # Use flexible matching
+            matched_versions, invalid_versions = self._find_matching_versions(user_versions, supported_versions)
+
+            # Log matching results
+            log.info(f"Matched: {matched_versions}, Invalid: {invalid_versions}")
+
+            if invalid_versions:
+                # Show close matches if possible
+                close_matches = []
+                for invalid_version in invalid_versions:
+                    for supported_version in supported_versions[:10]:  # Check first 10
+                        if invalid_version.lower() in supported_version.lower():
+                            close_matches.append(supported_version)
+                            break
+
+                error_msg = f"❌ **Invalid versions:** {', '.join(invalid_versions)}\n\n"
+                error_msg += f"**Supported versions:** {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}\n\n"
+
+                if close_matches:
+                    error_msg += f"**Did you mean:** {', '.join(close_matches)}\n\n"
+
+                error_msg += "**Tip:** You can use partial versions like `1.21` to match multiple versions."
+
+                await message.channel.send(error_msg)
+                return
+
+            if not matched_versions:
+                await message.channel.send("❌ No valid versions found. Please try again.")
+                return
+
+            # Success - store the matched versions
+            session['minecraft_versions'] = matched_versions
+            session['step'] = None  # Clear the step
+
+            # Show confirmation of what was matched
+            if len(user_versions) != len(matched_versions):
+                matched_msg = f"✅ **Matched versions:** {', '.join(matched_versions)}\n\nProceeding to loader selection..."
+                await message.channel.send(matched_msg)
+
+            await self._ask_loader_type(message.channel)
+            return
 
         # Handle loader specification
         elif session.get('step') == 'specify_loaders':
-            try:
-                # Clean up the input
-                loaders_input = message.content.strip().lower()
+            # Clean up the input
+            loaders_input = message.content.strip().lower()
 
-                # Handle single loader or comma-separated loaders
-                if ',' in loaders_input:
-                    loaders = [l.strip() for l in loaders_input.split(',')]
-                else:
-                    loaders = [loaders_input.strip()]
+            # Handle single loader or comma-separated loaders
+            if ',' in loaders_input:
+                loaders = [l.strip() for l in loaders_input.split(',')]
+            else:
+                loaders = [loaders_input.strip()]
 
-                # Remove empty strings
-                loaders = [l for l in loaders if l]
+            # Remove empty strings
+            loaders = [l for l in loaders if l]
 
-                if not loaders:
-                    await message.channel.send("❌ Please specify at least one loader.")
-                    return
-
-                supported_loaders = session['supported_loaders']
-
-                # Validate that all specified loaders are supported
-                invalid_loaders = [l for l in loaders if l not in supported_loaders]
-                if invalid_loaders:
-                    await message.channel.send(
-                        f"❌ **Invalid loaders:** {', '.join(invalid_loaders)}\n\n**Supported loaders:** {', '.join(supported_loaders)}\n\nPlease try again with supported loaders only.")
-                    return
-
-                session['loaders'] = loaders
-                session['step'] = None  # Clear the step
-                await self._ask_release_channel(message.channel)
-                return  # ADD THIS LINE - This was missing too!
-
-            except Exception as e:
-                log.error(f"Error processing loaders: {e}")
-                await message.channel.send(
-                    "❌ Invalid format. Please use comma-separated loaders (e.g., `fabric, forge`) or a single loader (e.g., `fabric`).")
+            if not loaders:
+                await message.channel.send("❌ Please specify at least one loader.")
                 return
+
+            supported_loaders = session['supported_loaders']
+
+            # Validate that all specified loaders are supported
+            invalid_loaders = [l for l in loaders if l not in supported_loaders]
+            if invalid_loaders:
+                await message.channel.send(
+                    f"❌ **Invalid loaders:** {', '.join(invalid_loaders)}\n\n**Supported loaders:** {', '.join(supported_loaders)}\n\nPlease try again with supported loaders only.")
+                return
+
+            session['loaders'] = loaders
+            session['step'] = None  # Clear the step
+            await self._ask_release_channel(message.channel)
+            return
 
     # Additional commands
     @modrinth.command(name="list")
@@ -1042,3 +1110,69 @@ class ModrinthNotifier(commands.Cog):
             )
 
         await ctx.send(embed=embed)
+
+    @modrinth.command(name="debug")
+    @commands.is_owner()
+    async def debug_versions(self, ctx, project_id: str):
+        """Debug command to show project versions (owner only)."""
+        try:
+            project_info = await self.api.get_project(project_id)
+            all_versions = await self.api.get_all_project_versions(project_id)
+
+            # Extract unique game versions
+            game_versions = set()
+            for version in all_versions:
+                game_versions.update(version.game_versions)
+
+            game_versions = sorted(list(game_versions), reverse=True)
+
+            embed = discord.Embed(
+                title=f"Debug: {project_info.name}",
+                color=discord.Color.orange()
+            )
+
+            embed.add_field(
+                name="Project ID",
+                value=f"`{project_id}`",
+                inline=False
+            )
+
+            embed.add_field(
+                name="Total Versions",
+                value=str(len(all_versions)),
+                inline=True
+            )
+
+            embed.add_field(
+                name="Unique Game Versions",
+                value=str(len(game_versions)),
+                inline=True
+            )
+
+            # Show first 20 game versions
+            versions_text = ", ".join(game_versions[:20])
+            if len(game_versions) > 20:
+                versions_text += f" (+{len(game_versions) - 20} more)"
+
+            embed.add_field(
+                name="Game Versions",
+                value=versions_text,
+                inline=False
+            )
+
+            # Show a few actual version objects for debugging
+            debug_versions = []
+            for i, version in enumerate(all_versions[:3]):
+                debug_versions.append(f"**{version.version_number}** - MC: {', '.join(version.game_versions[:3])}{'...' if len(version.game_versions) > 3 else ''}")
+
+            if debug_versions:
+                embed.add_field(
+                    name="Sample Versions",
+                    value="\n".join(debug_versions),
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"❌ Debug error: {e}")
