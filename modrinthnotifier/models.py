@@ -23,7 +23,21 @@ class ProjectInfo:
     def from_api_data(cls, data: Dict[str, Any]) -> 'ProjectInfo':
         """Create ProjectInfo from Modrinth API response."""
         return cls(
-            id=data["id"],
+            id=data["project_id"],  # Search results use "project_id"
+            name=data["title"],
+            slug=data["slug"],
+            description=data["description"],
+            project_type=data["project_type"],
+            downloads=data["downloads"],
+            icon_url=data.get("icon_url"),
+            color=data.get("color")
+        )
+
+    @classmethod
+    def from_project_data(cls, data: Dict[str, Any]) -> 'ProjectInfo':
+        """Create ProjectInfo from direct project API response (different structure)."""
+        return cls(
+            id=data["id"],  # Direct project calls use "id"
             name=data["title"],
             slug=data["slug"],
             description=data["description"],

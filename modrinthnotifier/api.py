@@ -126,21 +126,15 @@ class ModrinthAPI:
         """Search for projects on Modrinth."""
         params = {
             "query": query,
-            "limit": limit,
-            "facets": []
+            "limit": limit
         }
 
         if project_type:
-            params["facets"].append(f'[["project_type:{project_type}"]]')
-
-        # Convert facets to JSON string if any
-        if params["facets"]:
-            params["facets"] = f'[{",".join(params["facets"])}]'
-        else:
-            del params["facets"]
+            params["facets"] = f'[["project_type:{project_type}"]]'
 
         try:
             data = await self._make_request("/search", params)
+            # Use from_api_data for search results (which have different structure)
             return [ProjectInfo.from_api_data(hit) for hit in data.get("hits", [])]
         except Exception as e:
             log.error(f"Error searching projects: {e}")
@@ -150,7 +144,8 @@ class ModrinthAPI:
         """Get project information by ID or slug."""
         try:
             data = await self._make_request(f"/project/{project_id}")
-            return ProjectInfo.from_api_data(data)
+            # Use from_project_data for direct project calls (which have different structure)
+            return ProjectInfo.from_project_data(data)
         except ProjectNotFoundError:
             raise
         except Exception as e:
