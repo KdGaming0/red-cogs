@@ -825,6 +825,7 @@ class ModrinthNotifier(commands.Cog):
         # Handle version specification
         if session.get('step') == 'specify_versions':
             try:
+                log.debug(f"Processing version specification: {message.content}")
                 # Clean up the input
                 versions_input = message.content.strip()
 
@@ -836,27 +837,31 @@ class ModrinthNotifier(commands.Cog):
 
                 # Remove empty strings
                 versions = [v for v in versions if v]
+                log.debug(f"Parsed versions: {versions}")
 
                 if not versions:
                     await message.channel.send("❌ Please specify at least one version.")
                     return
 
                 supported_versions = session['supported_game_versions']
+                log.debug(f"Supported versions: {supported_versions[:10]}...")
 
                 # Validate that all specified versions are supported
                 invalid_versions = [v for v in versions if v not in supported_versions]
                 if invalid_versions:
+                    log.debug(f"Invalid versions found: {invalid_versions}")
                     await message.channel.send(
                         f"❌ **Invalid versions:** {', '.join(invalid_versions)}\n\n**Supported versions:** {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}\n\nPlease try again with supported versions only.")
                     return
 
+                log.debug(f"All versions valid, proceeding to loader type selection")
                 session['minecraft_versions'] = versions
                 session['step'] = None  # Clear the step
-                await self._ask_loader_type(message.channel)
-                return  # ADD THIS LINE - This was missing!
+                await self._ask_loader_type(message)
+                return
 
             except Exception as e:
-                log.error(f"Error processing versions: {e}")
+                log.error(f"Error processing versions: {e}", exc_info=True)
                 await message.channel.send(
                     "❌ Invalid format. Please use comma-separated versions (e.g., `1.21.4, 1.21.3`) or a single version (e.g., `1.21.4`).")
                 return
@@ -864,6 +869,7 @@ class ModrinthNotifier(commands.Cog):
         # Handle loader specification
         elif session.get('step') == 'specify_loaders':
             try:
+                log.debug(f"Processing loader specification: {message.content}")
                 # Clean up the input
                 loaders_input = message.content.strip().lower()
 
@@ -875,27 +881,31 @@ class ModrinthNotifier(commands.Cog):
 
                 # Remove empty strings
                 loaders = [l for l in loaders if l]
+                log.debug(f"Parsed loaders: {loaders}")
 
                 if not loaders:
                     await message.channel.send("❌ Please specify at least one loader.")
                     return
 
                 supported_loaders = session['supported_loaders']
+                log.debug(f"Supported loaders: {supported_loaders}")
 
                 # Validate that all specified loaders are supported
                 invalid_loaders = [l for l in loaders if l not in supported_loaders]
                 if invalid_loaders:
+                    log.debug(f"Invalid loaders found: {invalid_loaders}")
                     await message.channel.send(
                         f"❌ **Invalid loaders:** {', '.join(invalid_loaders)}\n\n**Supported loaders:** {', '.join(supported_loaders)}\n\nPlease try again with supported loaders only.")
                     return
 
+                log.debug(f"All loaders valid, proceeding to release channel selection")
                 session['loaders'] = loaders
                 session['step'] = None  # Clear the step
-                await self._ask_release_channel(message.channel)
-                return  # ADD THIS LINE - This was missing too!
+                await self._ask_release_channel(message)
+                return
 
             except Exception as e:
-                log.error(f"Error processing loaders: {e}")
+                log.error(f"Error processing loaders: {e}", exc_info=True)
                 await message.channel.send(
                     "❌ Invalid format. Please use comma-separated loaders (e.g., `fabric, forge`) or a single loader (e.g., `fabric`).")
                 return
