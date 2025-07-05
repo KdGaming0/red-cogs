@@ -14,7 +14,7 @@ log = logging.getLogger("red.modrinthnotifier.api")
 class RateLimiter:
     """Rate limiter for Modrinth API requests."""
 
-    def __init__(self, max_requests: int = 300, window: int = 60):
+    def __init__(self, max_requests: int = 250, window: int = 60):
         self.max_requests = max_requests
         self.window = window
         self.requests: List[float] = []
@@ -24,11 +24,8 @@ class RateLimiter:
         """Acquire permission to make a request."""
         async with self._lock:
             now = datetime.utcnow().timestamp()
-
-            # Remove requests outside the window
             self.requests = [req for req in self.requests if now - req < self.window]
 
-            # Check if we can make a request
             if len(self.requests) >= self.max_requests:
                 wait_time = self.window - (now - self.requests[0])
                 if wait_time > 0:
@@ -43,10 +40,6 @@ class ModrinthAPIError(Exception):
 
 class ProjectNotFoundError(ModrinthAPIError):
     """Raised when a project is not found."""
-    pass
-
-class RateLimitError(ModrinthAPIError):
-    """Raised when rate limited."""
     pass
 
 class ModrinthAPI:
@@ -70,7 +63,7 @@ class ModrinthAPI:
         """Start the aiohttp session."""
         if self.session is None or self.session.closed:
             headers = {"User-Agent": self.USER_AGENT}
-            timeout = aiohttp.ClientTimeout(total=10)
+            timeout = aiohttp.ClientTimeout(total=15)
             self.session = aiohttp.ClientSession(headers=headers, timeout=timeout)
 
     async def close_session(self):
@@ -121,20 +114,16 @@ class ModrinthAPI:
 
         raise ModrinthAPIError("Max retries exceeded")
 
-    async def search_projects(self, query: str, limit: int = 10,
-                            project_type: Optional[str] = None) -> List[ProjectInfo]:
+    async def search_projects(self, query: str, limit: int = 10) -> List[ProjectInfo]:
         """Search for projects on Modrinth."""
         params = {
             "query": query,
-            "limit": limit
+            "limit": limit,
+            "index": "relevance"
         }
-
-        if project_type:
-            params["facets"] = f'[["project_type:{project_type}"]]'
 
         try:
             data = await self._make_request("/search", params)
-            # Use from_api_data for search results (which have different structure)
             return [ProjectInfo.from_api_data(hit) for hit in data.get("hits", [])]
         except Exception as e:
             log.error(f"Error searching projects: {e}")
@@ -144,18 +133,16 @@ class ModrinthAPI:
         """Get project information by ID or slug."""
         try:
             data = await self._make_request(f"/project/{project_id}")
-            # Use from_project_data for direct project calls (which have different structure)
-            return ProjectInfo.from_project_data(data)
+            return ProjectInfo.from_api_data(data)
         except ProjectNotFoundError:
             raise
         except Exception as e:
             log.error(f"Error fetching project {project_id}: {e}")
             raise ModrinthAPIError(f"Failed to fetch project: {e}")
 
-    async def get_project_versions(self, project_id: str, limit: int = 50,
+    async def get_project_versions(self, project_id: str, limit: int = 100,
                                  loaders: Optional[List[str]] = None,
-                                 game_versions: Optional[List[str]] = None,
-                                 include_all_channels: bool = False) -> List[VersionInfo]:
+                                 game_versions: Optional[List[str]] = None) -> List[VersionInfo]:
         """Get versions for a project with optional filtering."""
         params = {"limit": limit}
 
@@ -163,9 +150,6 @@ class ModrinthAPI:
             params["loaders"] = '["' + '","'.join(loaders) + '"]'
         if game_versions:
             params["game_versions"] = '["' + '","'.join(game_versions) + '"]'
-
-        # If we want all channels, don't filter by version type
-        # The API returns all by default unless we specify featured=true
 
         try:
             data = await self._make_request(f"/project/{project_id}/version", params)
@@ -177,21 +161,14 @@ class ModrinthAPI:
             raise ModrinthAPIError(f"Failed to fetch versions: {e}")
 
     async def get_all_project_versions(self, project_id: str) -> List[VersionInfo]:
-        """Get ALL versions for a project (including beta/alpha) to determine support."""
+        """Get ALL versions for a project to determine complete support."""
         try:
-            # Get a large number of versions to capture all supported game versions and loaders
-            # Modrinth API max limit is typically 100 per request
             all_versions = []
             offset = 0
             limit = 100
 
             while True:
-                params = {
-                    "limit": limit,
-                    "offset": offset
-                }
-
-                data = await self._make_request(f"/project/{project_id}/version", params)
+                data = await self._make_request(f"/project/{project_id}/version", {"limit": limit, "offset": offset})
                 versions = [VersionInfo.from_api_data(version) for version in data]
 
                 if not versions:
@@ -199,14 +176,12 @@ class ModrinthAPI:
 
                 all_versions.extend(versions)
 
-                # If we got less than the limit, we've reached the end
                 if len(versions) < limit:
                     break
 
                 offset += limit
 
-                # Safety limit to prevent infinite loops
-                if len(all_versions) >= 1000:
+                if len(all_versions) >= 1000:  # Safety limit
                     break
 
             return all_versions
@@ -216,13 +191,3 @@ class ModrinthAPI:
         except Exception as e:
             log.error(f"Error fetching all versions for {project_id}: {e}")
             raise ModrinthAPIError(f"Failed to fetch all versions: {e}")
-
-    async def validate_project_id(self, project_id: str) -> Optional[str]:
-        """Validate a project ID and return the project name if valid."""
-        try:
-            project = await self.get_project(project_id)
-            return project.name
-        except ProjectNotFoundError:
-            return None
-        except ModrinthAPIError:
-            return None

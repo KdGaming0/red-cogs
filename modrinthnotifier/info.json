@@ -1,11 +1,10 @@
 {
-    "author": ["KdGaming0"],
     "name": "ModrinthNotifier",
-    "short": "Monitor Modrinth projects for updates",
-    "description": "A comprehensive cog that monitors Modrinth projects (mods, modpacks, resource packs, shaders) for updates and sends rich notifications to Discord channels. Features include server-wide monitoring, personal watchlists, role pinging, and intelligent polling.",
-    "tags": ["modrinth", "minecraft", "notifications", "updates", "mods"],
-    "requirements": ["aiohttp>=3.8.0"],
+    "short": "Enhanced Modrinth project update notifications",
+    "description": "Monitor Modrinth projects for updates with advanced filtering and interactive setup",
+    "author": ["KdGaming0"],
+    "tags": ["modrinth", "notifications", "minecraft", "mods"],
+    "requirements": [],
     "min_bot_version": "3.5.0",
-    "end_user_data_statement": "This cog stores project IDs, version information, and notification preferences. No personal user data is collected beyond Discord user IDs for watchlist management.",
-    "type": "COG"
+    "end_user_data_statement": "This cog stores project monitoring configurations and user preferences."
 }

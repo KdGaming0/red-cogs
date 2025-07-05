@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Any, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+import re
 
 log = logging.getLogger("red.modrinthnotifier.models")
 
@@ -23,21 +24,7 @@ class ProjectInfo:
     def from_api_data(cls, data: Dict[str, Any]) -> 'ProjectInfo':
         """Create ProjectInfo from Modrinth API response."""
         return cls(
-            id=data["project_id"],  # Search results use "project_id"
-            name=data["title"],
-            slug=data["slug"],
-            description=data["description"],
-            project_type=data["project_type"],
-            downloads=data["downloads"],
-            icon_url=data.get("icon_url"),
-            color=data.get("color")
-        )
-
-    @classmethod
-    def from_project_data(cls, data: Dict[str, Any]) -> 'ProjectInfo':
-        """Create ProjectInfo from direct project API response (different structure)."""
-        return cls(
-            id=data["id"],  # Direct project calls use "id"
+            id=data.get("project_id", data.get("id")),
             name=data["title"],
             slug=data["slug"],
             description=data["description"],
@@ -94,6 +81,22 @@ class VersionInfo:
                 return False
 
         return True
+
+def extract_minecraft_version(version_string: str) -> Optional[str]:
+    """Extract Minecraft version from version strings like 'mc1.21.6-0.6.13-fabric'."""
+    # Common patterns for Minecraft versions in mod version strings
+    patterns = [
+        r'(?:mc|minecraft)[-_]?(\d+\.\d+(?:\.\d+)?)',  # mc1.21.6, minecraft-1.21.6
+        r'(\d+\.\d+(?:\.\d+)?)(?:-|_|\.)',  # 1.21.6-fabric, 1.21.6_fabric
+        r'^(\d+\.\d+(?:\.\d+)?)$',  # Just the version number
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, version_string, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    return version_string  # Return as-is if no pattern matches
 
 @dataclass
 class ChannelMonitor:
@@ -172,7 +175,6 @@ class MonitoredProject:
 class GuildConfig:
     """Guild-specific configuration."""
     projects: Dict[str, MonitoredProject] = field(default_factory=dict)
-    channel_id: Optional[int] = None
     enabled: bool = True
     poll_interval: int = 300
 
@@ -180,7 +182,6 @@ class GuildConfig:
         """Convert to dictionary for storage."""
         return {
             "projects": {k: v.to_dict() for k, v in self.projects.items()},
-            "channel_id": self.channel_id,
             "enabled": self.enabled,
             "poll_interval": self.poll_interval
         }
@@ -194,32 +195,6 @@ class GuildConfig:
 
         return cls(
             projects=projects,
-            channel_id=data.get("channel_id"),
             enabled=data.get("enabled", True),
             poll_interval=data.get("poll_interval", 300)
-        )
-
-@dataclass
-class UserConfig:
-    """User-specific configuration for personal watchlists."""
-    projects: Dict[str, MonitoredProject] = field(default_factory=dict)
-    enabled: bool = True
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for storage."""
-        return {
-            "projects": {k: v.to_dict() for k, v in self.projects.items()},
-            "enabled": self.enabled
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'UserConfig':
-        """Create from stored dictionary."""
-        projects = {}
-        for k, v in data.get("projects", {}).items():
-            projects[k] = MonitoredProject.from_dict(v)
-
-        return cls(
-            projects=projects,
-            enabled=data.get("enabled", True)
         )

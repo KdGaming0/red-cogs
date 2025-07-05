@@ -12,7 +12,6 @@ def create_update_embed(project: ProjectInfo, version: VersionInfo,
                        title_prefix: str = "") -> discord.Embed:
     """Create an enhanced embed for version updates."""
 
-    # Color based on version type
     color_map = {
         "release": discord.Color.green(),
         "beta": discord.Color.orange(),
@@ -24,18 +23,17 @@ def create_update_embed(project: ProjectInfo, version: VersionInfo,
         title=f"{title_prefix}{project.name} - New Version Available!",
         description=f"Version **{version.version_number}** has been released",
         color=color,
-        url=f"https://modrinth.com/project/{project.slug}/version/{version.id}"
+        url=f"https://modrinth.com/{project.project_type}/{project.slug}/version/{version.id}"
     )
 
     if project.icon_url:
         embed.set_thumbnail(url=project.icon_url)
 
-    # Version information
     embed.add_field(name="Version", value=version.version_number, inline=True)
     embed.add_field(name="Type", value=version.version_type.title(), inline=True)
     embed.add_field(name="Published", value=discord.utils.format_dt(version.date_published, style="R"), inline=True)
 
-    # Minecraft versions (highlighted if filtered)
+    # Game versions
     game_versions_display = version.game_versions
     if monitor and monitor.required_game_versions:
         game_versions_display = [
@@ -48,7 +46,7 @@ def create_update_embed(project: ProjectInfo, version: VersionInfo,
         game_versions_str += f" (+{len(version.game_versions) - 8} more)"
     embed.add_field(name="Minecraft Versions", value=game_versions_str, inline=True)
 
-    # Loaders (highlighted if filtered)
+    # Loaders
     loaders_display = version.loaders
     if monitor and monitor.required_loaders:
         loaders_display = [
@@ -59,10 +57,9 @@ def create_update_embed(project: ProjectInfo, version: VersionInfo,
     loaders_str = ", ".join(loaders_display) if loaders_display else "Universal"
     embed.add_field(name="Loaders", value=loaders_str, inline=True)
 
-    # Downloads
     embed.add_field(name="Project Downloads", value=f"{project.downloads:,}", inline=True)
 
-    # Add filter information if applicable
+    # Filter information
     if monitor and (monitor.required_loaders or monitor.required_game_versions or monitor.required_version_types):
         filter_info = []
         if monitor.required_loaders:
@@ -78,7 +75,7 @@ def create_update_embed(project: ProjectInfo, version: VersionInfo,
             inline=False
         )
 
-    # Changelog (truncated if too long)
+    # Changelog
     if version.changelog:
         changelog = version.changelog.strip()
         if len(changelog) > 800:
@@ -86,19 +83,18 @@ def create_update_embed(project: ProjectInfo, version: VersionInfo,
         embed.add_field(name="📝 Changelog", value=changelog, inline=False)
 
     # Links
-    links = []
-    links.append(f"[View on Modrinth](https://modrinth.com/project/{project.slug})")
-    links.append(f"[Version Details](https://modrinth.com/project/{project.slug}/version/{version.id})")
+    links = [
+        f"[View on Modrinth](https://modrinth.com/{project.project_type}/{project.slug})",
+        f"[Version Details](https://modrinth.com/{project.project_type}/{project.slug}/version/{version.id})"
+    ]
     embed.add_field(name="🔗 Links", value=" • ".join(links), inline=False)
 
-    # Footer
     if is_initial:
         embed.set_footer(text="🧪 This is a test notification to confirm monitoring is working")
     else:
         embed.set_footer(text="Modrinth Update Notifier • Updates every 5 minutes")
 
     embed.timestamp = datetime.utcnow()
-
     return embed
 
 def create_project_info_embed(project: ProjectInfo) -> discord.Embed:
@@ -119,30 +115,7 @@ def create_project_info_embed(project: ProjectInfo) -> discord.Embed:
 
     embed.set_footer(text="Modrinth Project Information")
     embed.timestamp = datetime.utcnow()
-
     return embed
-
-def parse_filter_string(filters: str) -> Tuple[Optional[List[str]], Optional[List[str]]]:
-    """Parse filter string into loaders and game versions.
-
-    Format: 'loaders|game_versions' (e.g., 'fabric,forge|1.20,1.21')
-    """
-    if not filters or filters.strip() == "":
-        return None, None
-
-    parts = filters.split("|", 1)
-
-    # Parse loaders
-    loaders = None
-    if len(parts) > 0 and parts[0].strip():
-        loaders = [loader.strip().lower() for loader in parts[0].split(",") if loader.strip()]
-
-    # Parse game versions
-    game_versions = None
-    if len(parts) > 1 and parts[1].strip():
-        game_versions = [version.strip() for version in parts[1].split(",") if version.strip()]
-
-    return loaders, game_versions
 
 def get_valid_loaders() -> List[str]:
     """Get list of valid Minecraft mod loaders."""
@@ -150,7 +123,7 @@ def get_valid_loaders() -> List[str]:
         "fabric", "forge", "neoforge", "quilt", "modloader",
         "rift", "liteloader", "datapack", "bukkit", "spigot",
         "paper", "purpur", "folia", "velocity", "waterfall",
-        "bungeecord", "sponge", "vanilla"
+        "bungeecord", "sponge", "vanilla", "minecraft"
     ]
 
 def get_valid_version_types() -> List[str]:
