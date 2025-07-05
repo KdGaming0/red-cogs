@@ -71,6 +71,17 @@ class ModrinthNotifier(commands.Cog):
             self._guild_configs[guild_id] = GuildConfig()
         return self._guild_configs[guild_id]
 
+    def _get_user_from_context(self, ctx) -> Optional[int]:
+        """Extract user ID from context, handling both command context and channel objects."""
+        if hasattr(ctx, 'author'):
+            return ctx.author.id
+        else:
+            # ctx is a channel, find the session by channel ID
+            for user_id, session in self._interactive_sessions.items():
+                if session.get('channel_id') == ctx.id:
+                    return user_id
+            return None
+
     async def _poll_loop(self):
         """Main polling loop for checking updates."""
         await self.bot.wait_until_red_ready()
@@ -295,7 +306,14 @@ class ModrinthNotifier(commands.Cog):
 
     async def _ask_minecraft_version(self, ctx):
         """Ask for Minecraft version filtering."""
-        session = self._interactive_sessions[ctx.author.id]
+        user_id = self._get_user_from_context(ctx)
+        if not user_id:
+            return
+
+        session = self._interactive_sessions.get(user_id)
+        if not session:
+            return
+
         supported_versions = session['supported_game_versions']
 
         embed = discord.Embed(
@@ -327,7 +345,7 @@ class ModrinthNotifier(commands.Cog):
             await msg.add_reaction(reaction)
 
         def check(reaction, user):
-            return (user == ctx.author and
+            return (user.id == user_id and
                    str(reaction.emoji) in reactions and
                    reaction.message.id == msg.id)
 
@@ -335,7 +353,7 @@ class ModrinthNotifier(commands.Cog):
             reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
             await msg.delete()
 
-            session = self._interactive_sessions[ctx.author.id]
+            session = self._interactive_sessions[user_id]
 
             if str(reaction.emoji) == "1️⃣":
                 session['minecraft_versions'] = None
@@ -350,27 +368,13 @@ class ModrinthNotifier(commands.Cog):
 
         except asyncio.TimeoutError:
             await msg.edit(content="❌ Selection timed out.", embed=None)
-            self._interactive_sessions.pop(ctx.author.id, None)
+            self._interactive_sessions.pop(user_id, None)
 
     async def _ask_loader_type(self, ctx):
         """Ask for loader type filtering."""
-        # Get the user ID from session instead of ctx.author.id when called from on_message
-        if hasattr(ctx, 'author'):
-            user_id = ctx.author.id
-        else:
-            # ctx is actually a channel when called from on_message
-            # We need to get the user_id from the session
-            session = None
-            for uid, sess in self._interactive_sessions.items():
-                if sess.get('channel_id') == ctx.id:
-                    user_id = uid
-                    session = sess
-                    break
-
-            if not session:
-                return  # Session not found, abort
-        else:
-            user_id = ctx.author.id
+        user_id = self._get_user_from_context(ctx)
+        if not user_id:
+            return
 
         session = self._interactive_sessions.get(user_id)
         if not session:
@@ -445,21 +449,9 @@ class ModrinthNotifier(commands.Cog):
 
     async def _ask_release_channel(self, ctx):
         """Ask for release channel filtering."""
-        # Get user ID properly like in _ask_loader_type
-        if hasattr(ctx, 'author'):
-            user_id = ctx.author.id
-        else:
-            session = None
-            for uid, sess in self._interactive_sessions.items():
-                if sess.get('channel_id') == ctx.id:
-                    user_id = uid
-                    session = sess
-                    break
-
-            if not session:
-                return
-        else:
-            user_id = ctx.author.id
+        user_id = self._get_user_from_context(ctx)
+        if not user_id:
+            return
 
         session = self._interactive_sessions.get(user_id)
         if not session:
@@ -544,21 +536,9 @@ class ModrinthNotifier(commands.Cog):
 
     async def _ask_notification_channel(self, ctx):
         """Ask for notification channel."""
-        # Get user ID properly
-        if hasattr(ctx, 'author'):
-            user_id = ctx.author.id
-        else:
-            session = None
-            for uid, sess in self._interactive_sessions.items():
-                if sess.get('channel_id') == ctx.id:
-                    user_id = uid
-                    session = sess
-                    break
-
-            if not session:
-                return
-        else:
-            user_id = ctx.author.id
+        user_id = self._get_user_from_context(ctx)
+        if not user_id:
+            return
 
         embed = discord.Embed(
             title="Notification Channel",
@@ -598,21 +578,9 @@ class ModrinthNotifier(commands.Cog):
 
     async def _ask_role_pings(self, ctx):
         """Ask for role pings."""
-        # Get user ID properly
-        if hasattr(ctx, 'author'):
-            user_id = ctx.author.id
-        else:
-            session = None
-            for uid, sess in self._interactive_sessions.items():
-                if sess.get('channel_id') == ctx.id:
-                    user_id = uid
-                    session = sess
-                    break
-
-            if not session:
-                return
-        else:
-            user_id = ctx.author.id
+        user_id = self._get_user_from_context(ctx)
+        if not user_id:
+            return
 
         embed = discord.Embed(
             title="Role Notifications",
@@ -649,28 +617,16 @@ class ModrinthNotifier(commands.Cog):
 
     async def _finalize_setup(self, ctx):
         """Finalize the setup and create the monitoring configuration."""
-        # Get user ID properly
-        if hasattr(ctx, 'author'):
-            user_id = ctx.author.id
-            guild_id = ctx.guild.id
-        else:
-            session = None
-            for uid, sess in self._interactive_sessions.items():
-                if sess.get('channel_id') == ctx.id:
-                    user_id = uid
-                    guild_id = sess['guild_id']
-                    session = sess
-                    break
-
-            if not session:
-                return
-        else:
-            user_id = ctx.author.id
-            guild_id = ctx.guild.id
+        user_id = self._get_user_from_context(ctx)
+        if not user_id:
+            return
 
         session = self._interactive_sessions.get(user_id)
         if not session:
             return
+
+        # Get guild_id from session since ctx might be a channel
+        guild_id = session['guild_id']
 
         project = session['project']
         config = self._get_guild_config(guild_id)
