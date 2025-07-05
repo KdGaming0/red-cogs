@@ -354,7 +354,28 @@ class ModrinthNotifier(commands.Cog):
 
     async def _ask_loader_type(self, ctx):
         """Ask for loader type filtering."""
-        session = self._interactive_sessions[ctx.author.id]
+        # Get the user ID from session instead of ctx.author.id when called from on_message
+        if hasattr(ctx, 'author'):
+            user_id = ctx.author.id
+        else:
+            # ctx is actually a channel when called from on_message
+            # We need to get the user_id from the session
+            session = None
+            for uid, sess in self._interactive_sessions.items():
+                if sess.get('channel_id') == ctx.id:
+                    user_id = uid
+                    session = sess
+                    break
+
+            if not session:
+                return  # Session not found, abort
+        else:
+            user_id = ctx.author.id
+
+        session = self._interactive_sessions.get(user_id)
+        if not session:
+            return
+
         supported_loaders = session['supported_loaders']
 
         embed = discord.Embed(
@@ -398,7 +419,7 @@ class ModrinthNotifier(commands.Cog):
             await msg.add_reaction(reaction)
 
         def check(reaction, user):
-            return (user == ctx.author and
+            return (user.id == user_id and
                    str(reaction.emoji) in reactions and
                    reaction.message.id == msg.id)
 
@@ -406,7 +427,7 @@ class ModrinthNotifier(commands.Cog):
             reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
             await msg.delete()
 
-            session = self._interactive_sessions[ctx.author.id]
+            session = self._interactive_sessions[user_id]
 
             if str(reaction.emoji) == "1️⃣":
                 session['loaders'] = None
@@ -420,11 +441,29 @@ class ModrinthNotifier(commands.Cog):
 
         except asyncio.TimeoutError:
             await msg.edit(content="❌ Selection timed out.", embed=None)
-            self._interactive_sessions.pop(ctx.author.id, None)
+            self._interactive_sessions.pop(user_id, None)
 
     async def _ask_release_channel(self, ctx):
         """Ask for release channel filtering."""
-        session = self._interactive_sessions[ctx.author.id]
+        # Get user ID properly like in _ask_loader_type
+        if hasattr(ctx, 'author'):
+            user_id = ctx.author.id
+        else:
+            session = None
+            for uid, sess in self._interactive_sessions.items():
+                if sess.get('channel_id') == ctx.id:
+                    user_id = uid
+                    session = sess
+                    break
+
+            if not session:
+                return
+        else:
+            user_id = ctx.author.id
+
+        session = self._interactive_sessions.get(user_id)
+        if not session:
+            return
 
         # Check what release types are actually available for the filtered criteria
         async with ctx.typing():
@@ -479,7 +518,7 @@ class ModrinthNotifier(commands.Cog):
             await msg.add_reaction(reaction)
 
         def check(reaction, user):
-            return (user == ctx.author and
+            return (user.id == user_id and
                    str(reaction.emoji) in reactions and
                    reaction.message.id == msg.id)
 
@@ -487,7 +526,7 @@ class ModrinthNotifier(commands.Cog):
             reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
             await msg.delete()
 
-            session = self._interactive_sessions[ctx.author.id]
+            session = self._interactive_sessions[user_id]
 
             channel_map = {
                 "1️⃣": None,
@@ -501,10 +540,26 @@ class ModrinthNotifier(commands.Cog):
 
         except asyncio.TimeoutError:
             await msg.edit(content="❌ Selection timed out.", embed=None)
-            self._interactive_sessions.pop(ctx.author.id, None)
+            self._interactive_sessions.pop(user_id, None)
 
     async def _ask_notification_channel(self, ctx):
         """Ask for notification channel."""
+        # Get user ID properly
+        if hasattr(ctx, 'author'):
+            user_id = ctx.author.id
+        else:
+            session = None
+            for uid, sess in self._interactive_sessions.items():
+                if sess.get('channel_id') == ctx.id:
+                    user_id = uid
+                    session = sess
+                    break
+
+            if not session:
+                return
+        else:
+            user_id = ctx.author.id
+
         embed = discord.Embed(
             title="Notification Channel",
             description="Which channel should receive update notifications?",
@@ -520,15 +575,15 @@ class ModrinthNotifier(commands.Cog):
         await ctx.send(embed=embed)
 
         def check(message):
-            return message.author == ctx.author and message.channel == ctx.channel
+            return message.author.id == user_id and message.channel.id == ctx.id
 
         try:
             msg = await self.bot.wait_for('message', timeout=60.0, check=check)
 
-            session = self._interactive_sessions[ctx.author.id]
+            session = self._interactive_sessions[user_id]
 
             if msg.content.lower() == 'current':
-                session['notification_channel'] = ctx.channel
+                session['notification_channel'] = ctx
             elif msg.channel_mentions:
                 session['notification_channel'] = msg.channel_mentions[0]
             else:
@@ -539,10 +594,26 @@ class ModrinthNotifier(commands.Cog):
 
         except asyncio.TimeoutError:
             await ctx.send("❌ Channel selection timed out.")
-            self._interactive_sessions.pop(ctx.author.id, None)
+            self._interactive_sessions.pop(user_id, None)
 
     async def _ask_role_pings(self, ctx):
         """Ask for role pings."""
+        # Get user ID properly
+        if hasattr(ctx, 'author'):
+            user_id = ctx.author.id
+        else:
+            session = None
+            for uid, sess in self._interactive_sessions.items():
+                if sess.get('channel_id') == ctx.id:
+                    user_id = uid
+                    session = sess
+                    break
+
+            if not session:
+                return
+        else:
+            user_id = ctx.author.id
+
         embed = discord.Embed(
             title="Role Notifications",
             description="Which roles should be pinged for updates?",
@@ -558,12 +629,12 @@ class ModrinthNotifier(commands.Cog):
         await ctx.send(embed=embed)
 
         def check(message):
-            return message.author == ctx.author and message.channel == ctx.channel
+            return message.author.id == user_id and message.channel.id == ctx.id
 
         try:
             msg = await self.bot.wait_for('message', timeout=60.0, check=check)
 
-            session = self._interactive_sessions[ctx.author.id]
+            session = self._interactive_sessions[user_id]
 
             if msg.content.lower() == 'none':
                 session['roles'] = []
@@ -574,23 +645,42 @@ class ModrinthNotifier(commands.Cog):
 
         except asyncio.TimeoutError:
             await ctx.send("❌ Role selection timed out.")
-            self._interactive_sessions.pop(ctx.author.id, None)
+            self._interactive_sessions.pop(user_id, None)
 
     async def _finalize_setup(self, ctx):
         """Finalize the setup and create the monitoring configuration."""
-        session = self._interactive_sessions.get(ctx.author.id)
+        # Get user ID properly
+        if hasattr(ctx, 'author'):
+            user_id = ctx.author.id
+            guild_id = ctx.guild.id
+        else:
+            session = None
+            for uid, sess in self._interactive_sessions.items():
+                if sess.get('channel_id') == ctx.id:
+                    user_id = uid
+                    guild_id = sess['guild_id']
+                    session = sess
+                    break
+
+            if not session:
+                return
+        else:
+            user_id = ctx.author.id
+            guild_id = ctx.guild.id
+
+        session = self._interactive_sessions.get(user_id)
         if not session:
             return
 
         project = session['project']
-        config = self._get_guild_config(ctx.guild.id)
+        config = self._get_guild_config(guild_id)
 
         # Create or update monitored project
         if project.id not in config.projects:
             monitored_project = MonitoredProject(
                 id=project.id,
                 name=project.name,
-                added_by=ctx.author.id
+                added_by=user_id
             )
             config.projects[project.id] = monitored_project
         else:
@@ -606,7 +696,7 @@ class ModrinthNotifier(commands.Cog):
         )
 
         monitored_project.channels[session['notification_channel'].id] = channel_monitor
-        await self._save_guild_config(ctx.guild.id)
+        await self._save_guild_config(guild_id)
 
         # Send confirmation
         embed = discord.Embed(
@@ -657,12 +747,12 @@ class ModrinthNotifier(commands.Cog):
 
                     await session['notification_channel'].send(content=content, embed=update_embed)
                     monitored_project.last_version = latest_version.id
-                    await self._save_guild_config(ctx.guild.id)
+                    await self._save_guild_config(guild_id)
         except Exception as e:
             log.error(f"Error sending initial notification: {e}")
 
         # Clean up session
-        self._interactive_sessions.pop(ctx.author.id, None)
+        self._interactive_sessions.pop(user_id, None)
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -679,6 +769,9 @@ class ModrinthNotifier(commands.Cog):
             try:
                 versions_input = message.content.strip()
 
+                log.info(f"User {message.author.id} input version: '{versions_input}'")
+                log.info(f"Supported versions: {session['supported_game_versions']}")
+
                 # Parse versions (handle both single and comma-separated)
                 if ',' in versions_input:
                     versions = [extract_minecraft_version(v.strip()) for v in versions_input.split(',')]
@@ -688,6 +781,8 @@ class ModrinthNotifier(commands.Cog):
                 # Remove empty strings and None values
                 versions = [v for v in versions if v]
 
+                log.info(f"Parsed versions: {versions}")
+
                 if not versions:
                     await message.channel.send("❌ No valid versions found. Please try again.")
                     return
@@ -695,14 +790,22 @@ class ModrinthNotifier(commands.Cog):
                 supported_versions = session['supported_game_versions']
 
                 # Validate versions
+                valid_versions = [v for v in versions if v in supported_versions]
                 invalid_versions = [v for v in versions if v not in supported_versions]
+
+                log.info(f"Matched: {valid_versions}, Invalid: {invalid_versions}")
+
                 if invalid_versions:
                     await message.channel.send(
                         f"❌ Invalid versions: {', '.join(invalid_versions)}\n"
                         f"Supported versions: {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}")
                     return
 
-                session['minecraft_versions'] = versions
+                if not valid_versions:
+                    await message.channel.send("❌ No valid versions found. Please try again.")
+                    return
+
+                session['minecraft_versions'] = valid_versions
                 session['step'] = None
                 await self._ask_loader_type(message.channel)
                 return
