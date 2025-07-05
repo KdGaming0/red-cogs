@@ -154,7 +154,8 @@ class ModrinthAPI:
 
     async def get_project_versions(self, project_id: str, limit: int = 50,
                                  loaders: Optional[List[str]] = None,
-                                 game_versions: Optional[List[str]] = None) -> List[VersionInfo]:
+                                 game_versions: Optional[List[str]] = None,
+                                 include_all_channels: bool = False) -> List[VersionInfo]:
         """Get versions for a project with optional filtering."""
         params = {"limit": limit}
 
@@ -162,6 +163,9 @@ class ModrinthAPI:
             params["loaders"] = '["' + '","'.join(loaders) + '"]'
         if game_versions:
             params["game_versions"] = '["' + '","'.join(game_versions) + '"]'
+
+        # If we want all channels, don't filter by version type
+        # The API returns all by default unless we specify featured=true
 
         try:
             data = await self._make_request(f"/project/{project_id}/version", params)
@@ -171,6 +175,47 @@ class ModrinthAPI:
         except Exception as e:
             log.error(f"Error fetching versions for {project_id}: {e}")
             raise ModrinthAPIError(f"Failed to fetch versions: {e}")
+
+    async def get_all_project_versions(self, project_id: str) -> List[VersionInfo]:
+        """Get ALL versions for a project (including beta/alpha) to determine support."""
+        try:
+            # Get a large number of versions to capture all supported game versions and loaders
+            # Modrinth API max limit is typically 100 per request
+            all_versions = []
+            offset = 0
+            limit = 100
+
+            while True:
+                params = {
+                    "limit": limit,
+                    "offset": offset
+                }
+
+                data = await self._make_request(f"/project/{project_id}/version", params)
+                versions = [VersionInfo.from_api_data(version) for version in data]
+
+                if not versions:
+                    break
+
+                all_versions.extend(versions)
+
+                # If we got less than the limit, we've reached the end
+                if len(versions) < limit:
+                    break
+
+                offset += limit
+
+                # Safety limit to prevent infinite loops
+                if len(all_versions) >= 1000:
+                    break
+
+            return all_versions
+
+        except ProjectNotFoundError:
+            raise
+        except Exception as e:
+            log.error(f"Error fetching all versions for {project_id}: {e}")
+            raise ModrinthAPIError(f"Failed to fetch all versions: {e}")
 
     async def validate_project_id(self, project_id: str) -> Optional[str]:
         """Validate a project ID and return the project name if valid."""

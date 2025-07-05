@@ -274,8 +274,8 @@ class ModrinthNotifier(commands.Cog):
 
             def check(reaction, user):
                 return (user == ctx.author and
-                       str(reaction.emoji) in reactions[:len(search_results)] and
-                       reaction.message.id == msg.id)
+                        str(reaction.emoji) in reactions[:len(search_results)] and
+                        reaction.message.id == msg.id)
 
             try:
                 reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
@@ -286,14 +286,14 @@ class ModrinthNotifier(commands.Cog):
                 await msg.edit(content="❌ Selection timed out.", embed=None)
                 return
 
-        # Fetch project details and supported versions/loaders
+        # Fetch project details and ALL supported versions/loaders (including beta/alpha)
         async with ctx.typing():
             try:
                 # Get full project details
                 project_info = await self.api.get_project(selected_project.id)
 
-                # Get all versions to determine supported loaders and game versions
-                all_versions = await self.api.get_project_versions(selected_project.id, limit=100)
+                # Get ALL versions to determine supported loaders and game versions
+                all_versions = await self.api.get_all_project_versions(selected_project.id)
 
                 # Extract unique loaders and game versions
                 supported_loaders = set()
@@ -722,36 +722,72 @@ class ModrinthNotifier(commands.Cog):
         # Handle version specification
         if session.get('step') == 'specify_versions':
             try:
-                versions = [v.strip() for v in message.content.split(',')]
+                # Clean up the input
+                versions_input = message.content.strip()
+
+                # Handle single version or comma-separated versions
+                if ',' in versions_input:
+                    versions = [v.strip() for v in versions_input.split(',')]
+                else:
+                    versions = [versions_input]
+
+                # Remove empty strings
+                versions = [v for v in versions if v]
+
                 supported_versions = session['supported_game_versions']
 
                 # Validate that all specified versions are supported
                 invalid_versions = [v for v in versions if v not in supported_versions]
                 if invalid_versions:
-                    await message.channel.send(f"❌ Invalid versions: {', '.join(invalid_versions)}\nSupported versions: {', '.join(supported_versions[:10])}{'...' if len(supported_versions) > 10 else ''}")
+                    await message.channel.send(
+                        f"❌ Invalid versions: {', '.join(invalid_versions)}\nSupported versions: {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}")
                     return
 
                 session['minecraft_versions'] = versions
+                session['step'] = None  # Clear the step
                 await self._ask_loader_type(message.channel)
-            except Exception:
-                await message.channel.send("❌ Invalid format. Please use comma-separated versions.")
+                return  # Important: return here to prevent fall-through
+
+            except Exception as e:
+                log.error(f"Error processing versions: {e}")
+                await message.channel.send(
+                    "❌ Invalid format. Please use comma-separated versions (e.g., `1.21.4, 1.21.3`) or a single version.")
+                return
 
         # Handle loader specification
         elif session.get('step') == 'specify_loaders':
             try:
-                loaders = [l.strip().lower() for l in message.content.split(',')]
+                # Clean up the input
+                loaders_input = message.content.strip().lower()
+
+                # Handle single loader or comma-separated loaders
+                if ',' in loaders_input:
+                    loaders = [l.strip() for l in loaders_input.split(',')]
+                else:
+                    loaders = [loaders_input]
+
+                # Remove empty strings
+                loaders = [l for l in loaders if l]
+
                 supported_loaders = session['supported_loaders']
 
                 # Validate that all specified loaders are supported
                 invalid_loaders = [l for l in loaders if l not in supported_loaders]
                 if invalid_loaders:
-                    await message.channel.send(f"❌ Invalid loaders: {', '.join(invalid_loaders)}\nSupported loaders: {', '.join(supported_loaders)}")
+                    await message.channel.send(
+                        f"❌ Invalid loaders: {', '.join(invalid_loaders)}\nSupported loaders: {', '.join(supported_loaders)}")
                     return
 
                 session['loaders'] = loaders
+                session['step'] = None  # Clear the step
                 await self._ask_release_channel(message.channel)
-            except Exception:
-                await message.channel.send("❌ Invalid format. Please use comma-separated loaders.")
+                return  # Important: return here to prevent fall-through
+
+            except Exception as e:
+                log.error(f"Error processing loaders: {e}")
+                await message.channel.send(
+                    "❌ Invalid format. Please use comma-separated loaders (e.g., `fabric, forge`) or a single loader.")
+                return
 
     # Rest of the commands remain the same...
     @modrinth.command(name="list")
