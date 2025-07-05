@@ -1,15 +1,20 @@
+"""Enhanced Modrinth Update Notifier cog for Red-DiscordBot."""
+
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Any
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple
+
 import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
+from redbot.core.utils.chat_formatting import box, humanize_list
 
-from .api import ModrinthAPI, ModrinthAPIError
-from .models import ProjectInfo, VersionInfo, GuildConfig, UserConfig, MonitoredProject
+from .api import ModrinthAPI, ModrinthAPIError, ProjectNotFoundError
+from .models import ProjectInfo, VersionInfo, ChannelMonitor, MonitoredProject, GuildConfig, UserConfig
+from .utils import create_update_embed, create_project_info_embed, parse_filter_string, get_valid_loaders
 
-log = logging.getLogger("red.modrinth_notifier")
+log = logging.getLogger("red.modrinthnotifier")
 
 class ModrinthNotifier(commands.Cog):
     """Monitor Modrinth projects for updates with enhanced features."""
@@ -62,20 +67,15 @@ class ModrinthNotifier(commands.Cog):
 
     async def _load_configs(self):
         """Load all configurations from storage."""
-        try:
-            # Load guild configs
-            all_guilds = await self.config.all_guilds()
-            for guild_id, data in all_guilds.items():
-                self._guild_configs[guild_id] = GuildConfig.from_dict(data)
+        # Load guild configs
+        all_guilds = await self.config.all_guilds()
+        for guild_id, data in all_guilds.items():
+            self._guild_configs[guild_id] = GuildConfig.from_dict(data)
 
-            # Load user configs
-            all_users = await self.config.all_users()
-            for user_id, data in all_users.items():
-                self._user_configs[user_id] = UserConfig.from_dict(data)
-
-            log.info(f"Loaded {len(self._guild_configs)} guild configs and {len(self._user_configs)} user configs")
-        except Exception as e:
-            log.error(f"Error loading configs: {e}")
+        # Load user configs
+        all_users = await self.config.all_users()
+        for user_id, data in all_users.items():
+            self._user_configs[user_id] = UserConfig.from_dict(data)
 
     async def _save_guild_config(self, guild_id: int):
         """Save guild configuration to storage."""
@@ -112,182 +112,115 @@ class ModrinthNotifier(commands.Cog):
                 await asyncio.sleep(60)  # Wait 1 minute on error
 
     async def _check_all_updates(self):
-        """Check for updates across all configured projects."""
+        """Check for updates on all monitored projects."""
+        # Check guild projects
+        for guild_id, config in self._guild_configs.items():
+            if not config.enabled:
+                continue
+
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                continue
+
+            for project_id, project in config.projects.items():
+                await self._check_guild_project_updates(guild, project)
+
+        # Check user projects
+        for user_id, config in self._user_configs.items():
+            if not config.enabled:
+                continue
+
+            user = self.bot.get_user(user_id)
+            if not user:
+                continue
+
+            for project_id, project in config.projects.items():
+                await self._check_user_project_updates(user, project)
+
+    async def _check_guild_project_updates(self, guild: discord.Guild, project: MonitoredProject):
+        """Check for updates on a guild project."""
         try:
-            # Check guild projects
-            for guild_id, config in self._guild_configs.items():
-                if not config.enabled:
-                    continue
-
-                guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    continue
-
-                for project_id, monitored_project in config.projects.items():
-                    try:
-                        await self._check_project_update(guild, monitored_project)
-                    except Exception as e:
-                        log.error(f"Error checking project {project_id} for guild {guild_id}: {e}")
-
-            # Check user projects
-            for user_id, config in self._user_configs.items():
-                if not config.enabled:
-                    continue
-
-                user = self.bot.get_user(user_id)
-                if not user:
-                    continue
-
-                for project_id, monitored_project in config.projects.items():
-                    try:
-                        await self._check_user_project_update(user, monitored_project)
-                    except Exception as e:
-                        log.error(f"Error checking project {project_id} for user {user_id}: {e}")
-
-        except Exception as e:
-            log.error(f"Error in _check_all_updates: {e}", exc_info=True)
-
-    async def _check_project_update(self, guild: discord.Guild, monitored_project: MonitoredProject):
-        """Check for updates for a specific guild project."""
-        try:
-            versions = await self.api.get_project_versions(
-                monitored_project.project_id,
-                loaders=monitored_project.loaders,
-                game_versions=monitored_project.game_versions
-            )
-
+            versions = await self.api.get_project_versions(project.id)
             if not versions:
                 return
 
-            # Filter by release channel
-            filtered_versions = [v for v in versions if v.version_type in monitored_project.release_channels]
-            if not filtered_versions:
+            latest_version = versions[0]
+
+            # Check if this is a new version
+            if project.last_version and latest_version.id == project.last_version:
                 return
 
-            latest_version = filtered_versions[0]
+            # Send notifications to all monitored channels
+            for channel_id, monitor in project.channels.items():
+                channel = guild.get_channel(channel_id)
+                if not channel:
+                    continue
 
-            if latest_version.id != monitored_project.last_version:
-                # New version found!
-                await self._send_guild_update_notification(guild, monitored_project, latest_version)
-                monitored_project.last_version = latest_version.id
-                await self._save_guild_config(guild.id)
+                # Check if version matches filters
+                if not latest_version.matches_filters(monitor.required_loaders, monitor.required_game_versions, monitor.required_version_types):
+                    continue
 
-        except ModrinthAPIError as e:
-            log.error(f"API error checking project {monitored_project.project_id}: {e}")
+                # Get project info for embed
+                project_info = await self.api.get_project(project.id)
 
-    async def _check_user_project_update(self, user: discord.User, monitored_project: MonitoredProject):
-        """Check for updates for a specific user project."""
-        try:
-            versions = await self.api.get_project_versions(
-                monitored_project.project_id,
-                loaders=monitored_project.loaders,
-                game_versions=monitored_project.game_versions
-            )
+                # Create and send embed
+                embed = create_update_embed(project_info, latest_version, monitor)
 
-            if not versions:
-                return
-
-            # Filter by release channel
-            filtered_versions = [v for v in versions if v.version_type in monitored_project.release_channels]
-            if not filtered_versions:
-                return
-
-            latest_version = filtered_versions[0]
-
-            if latest_version.id != monitored_project.last_version:
-                # New version found!
-                await self._send_user_update_notification(user, monitored_project, latest_version)
-                monitored_project.last_version = latest_version.id
-                await self._save_user_config(user.id)
-
-        except ModrinthAPIError as e:
-            log.error(f"API error checking project {monitored_project.project_id}: {e}")
-
-    async def _send_guild_update_notification(self, guild: discord.Guild, monitored_project: MonitoredProject, version: VersionInfo):
-        """Send update notification to guild channel."""
-        guild_config = self._get_guild_config(guild.id)
-
-        if not guild_config.channel_id:
-            return
-
-        channel = guild.get_channel(guild_config.channel_id)
-        if not channel:
-            return
-
-        try:
-            # Get project info for the embed
-            project_info = await self.api.get_project(monitored_project.project_id)
-
-            embed = discord.Embed(
-                title=f"🔄 {project_info.name} Updated!",
-                description=f"**Version:** {version.version_number}\n**Type:** {version.version_type.title()}",
-                color=discord.Color.green(),
-                timestamp=version.date_published,
-                url=f"https://modrinth.com/mod/{project_info.slug}"
-            )
-
-            if version.changelog:
-                changelog = version.changelog[:1000] + "..." if len(version.changelog) > 1000 else version.changelog
-                embed.add_field(name="📝 Changelog", value=changelog, inline=False)
-
-            embed.add_field(name="🎮 Game Versions", value=", ".join(version.game_versions[:5]), inline=True)
-            embed.add_field(name="⚙️ Loaders", value=", ".join(version.loaders), inline=True)
-            embed.add_field(name="💾 Downloads", value=str(version.downloads), inline=True)
-
-            if project_info.icon_url:
-                embed.set_thumbnail(url=project_info.icon_url)
-
-            embed.set_footer(text="Modrinth Update Notifier")
-
-            # Prepare role mentions
-            content = None
-            if monitored_project.role_ids:
-                valid_roles = []
-                for role_id in monitored_project.role_ids:
+                # Prepare mentions
+                mentions = []
+                for role_id in monitor.role_ids:
                     role = guild.get_role(role_id)
                     if role:
-                        valid_roles.append(role.mention)
+                        mentions.append(role.mention)
 
-                if valid_roles:
-                    content = " ".join(valid_roles)
+                content = " ".join(mentions) if mentions else None
 
-            await channel.send(content=content, embed=embed)
+                try:
+                    await channel.send(content=content, embed=embed)
+                    log.info(f"Sent update notification for {project.name} to {guild.name}#{channel.name}")
+                except discord.HTTPException as e:
+                    log.error(f"Failed to send update to {guild.name}#{channel.name}: {e}")
+
+            # Update last version
+            project.last_version = latest_version.id
+            await self._save_guild_config(guild.id)
 
         except Exception as e:
-            log.error(f"Error sending guild notification: {e}")
+            log.error(f"Error checking guild project {project.id}: {e}")
 
-    async def _send_user_update_notification(self, user: discord.User, monitored_project: MonitoredProject, version: VersionInfo):
-        """Send update notification to user DM."""
+    async def _check_user_project_updates(self, user: discord.User, project: MonitoredProject):
+        """Check for updates on a user project."""
         try:
-            # Get project info for the embed
-            project_info = await self.api.get_project(monitored_project.project_id)
+            versions = await self.api.get_project_versions(project.id)
+            if not versions:
+                return
 
-            embed = discord.Embed(
-                title=f"🔄 {project_info.name} Updated!",
-                description=f"**Version:** {version.version_number}\n**Type:** {version.version_type.title()}",
-                color=discord.Color.blue(),
-                timestamp=version.date_published,
-                url=f"https://modrinth.com/mod/{project_info.slug}"
-            )
+            latest_version = versions[0]
 
-            if version.changelog:
-                changelog = version.changelog[:1000] + "..." if len(version.changelog) > 1000 else version.changelog
-                embed.add_field(name="📝 Changelog", value=changelog, inline=False)
+            # Check if this is a new version
+            if project.last_version and latest_version.id == project.last_version:
+                return
 
-            embed.add_field(name="🎮 Game Versions", value=", ".join(version.game_versions[:5]), inline=True)
-            embed.add_field(name="⚙️ Loaders", value=", ".join(version.loaders), inline=True)
+            # Get project info for embed
+            project_info = await self.api.get_project(project.id)
 
-            if project_info.icon_url:
-                embed.set_thumbnail(url=project_info.icon_url)
+            # Create and send embed
+            embed = create_update_embed(project_info, latest_version, title_prefix="🔔 Personal Watchlist: ")
 
-            embed.set_footer(text="Personal Modrinth Watchlist")
+            try:
+                await user.send(embed=embed)
+                log.info(f"Sent personal update notification for {project.name} to {user.name}")
+            except discord.HTTPException as e:
+                log.error(f"Failed to send DM to {user.name}: {e}")
 
-            await user.send(embed=embed)
+            # Update last version
+            project.last_version = latest_version.id
+            await self._save_user_config(user.id)
 
-        except discord.Forbidden:
-            log.warning(f"Cannot send DM to user {user.id}")
         except Exception as e:
-            log.error(f"Error sending user notification: {e}")
+            log.error(f"Error checking user project {project.id}: {e}")
+
+    # Enhanced Commands
 
     @commands.group(name="modrinth", aliases=["mr"])
     async def modrinth(self, ctx):
@@ -297,24 +230,28 @@ class ModrinthNotifier(commands.Cog):
     @modrinth.command(name="add")
     @commands.admin_or_permissions(manage_guild=True)
     async def add_project_interactive(self, ctx, *, project_name: str):
-        """Add a project to monitor with interactive setup."""
+        """Add a project to monitoring with interactive setup.
 
-        # Step 1: Search for projects
+        Usage: !modrinth add sodium
+
+        This will start an interactive setup process to configure monitoring.
+        """
+        # Search for projects
         async with ctx.typing():
             try:
-                search_results = await self.api.search_projects(project_name, limit=5)
+                search_results = await self.api.search_projects(project_name, limit=10)
                 if not search_results:
-                    await ctx.send("❌ No projects found with that name.")
+                    await ctx.send(f"❌ No projects found matching '{project_name}'.")
                     return
             except ModrinthAPIError as e:
                 await ctx.send(f"❌ Error searching for projects: {e}")
                 return
 
-        # If multiple results, let user choose
-        selected_project = None
+        # If only one result, proceed directly
         if len(search_results) == 1:
             selected_project = search_results[0]
         else:
+            # Show multiple options
             embed = discord.Embed(
                 title="Multiple Projects Found",
                 description="Please select a project by reacting with the corresponding number:",
@@ -349,16 +286,16 @@ class ModrinthNotifier(commands.Cog):
                 await msg.edit(content="❌ Selection timed out.", embed=None)
                 return
 
-        # Fetch project details and ALL supported versions/loaders (including all release channels)
+        # Fetch project details and ALL supported versions/loaders (including beta/alpha)
         async with ctx.typing():
             try:
                 # Get full project details
                 project_info = await self.api.get_project(selected_project.id)
 
-                # Get ALL versions to determine supported loaders and game versions across all release channels
+                # Get ALL versions to determine supported loaders and game versions
                 all_versions = await self.api.get_all_project_versions(selected_project.id)
 
-                # Extract unique loaders and game versions from ALL release channels
+                # Extract unique loaders and game versions across ALL channels
                 supported_loaders = set()
                 supported_game_versions = set()
 
@@ -368,7 +305,12 @@ class ModrinthNotifier(commands.Cog):
 
                 # Convert to sorted lists
                 supported_loaders = sorted(list(supported_loaders))
-                supported_game_versions = sorted(list(supported_game_versions), reverse=True)  # Latest first
+                # Sort game versions with latest first (reverse chronological)
+                supported_game_versions = sorted(list(supported_game_versions), reverse=True)
+
+                if not supported_loaders or not supported_game_versions:
+                    await ctx.send(f"❌ Could not determine supported loaders or game versions for this project.")
+                    return
 
             except ModrinthAPIError as e:
                 await ctx.send(f"❌ Error fetching project details: {e}")
@@ -379,6 +321,7 @@ class ModrinthNotifier(commands.Cog):
             'project': project_info,
             'supported_loaders': supported_loaders,
             'supported_game_versions': supported_game_versions,
+            'all_versions': all_versions,  # Store for release channel validation
             'step': 'confirm_project',
             'user_id': ctx.author.id,
             'channel_id': ctx.channel.id,
@@ -389,159 +332,325 @@ class ModrinthNotifier(commands.Cog):
         # Show project confirmation
         await self._show_project_confirmation(ctx, project_info, supported_loaders, supported_game_versions)
 
-    async def _show_project_confirmation(self, ctx, project_info: ProjectInfo, supported_loaders: List[str], supported_game_versions: List[str]):
-        """Show project confirmation with link to Modrinth page."""
+    async def _show_project_confirmation(self, ctx, project: ProjectInfo, supported_loaders: List[str], supported_game_versions: List[str]):
+        """Show project confirmation step with support info."""
         embed = discord.Embed(
-            title="📦 Project Confirmation",
-            description=f"**{project_info.name}**\n{project_info.description}",
+            title="Project Confirmation",
+            description=f"You selected: **{project.name}**",
             color=discord.Color.green(),
-            url=f"https://modrinth.com/mod/{project_info.slug}"
+            url=f"https://modrinth.com/{project.project_type}/{project.slug}"
         )
 
-        embed.add_field(name="📊 Type", value=project_info.project_type.title(), inline=True)
-        embed.add_field(name="📥 Downloads", value=f"{project_info.downloads:,}", inline=True)
-        embed.add_field(name="👥 Followers", value=f"{project_info.followers:,}", inline=True)
+        if project.icon_url:
+            embed.set_thumbnail(url=project.icon_url)
 
-        embed.add_field(
-            name="🎮 Supported Game Versions",
-            value=", ".join(supported_game_versions[:10]) + ("..." if len(supported_game_versions) > 10 else ""),
-            inline=False
-        )
-        embed.add_field(
-            name="⚙️ Supported Loaders",
-            value=", ".join(supported_loaders),
-            inline=False
-        )
+        embed.add_field(name="Type", value=project.project_type.title(), inline=True)
+        embed.add_field(name="Downloads", value=f"{project.downloads:,}", inline=True)
+        embed.add_field(name="Project ID", value=f"`{project.id}`", inline=True)
 
-        if project_info.icon_url:
-            embed.set_thumbnail(url=project_info.icon_url)
+        # Show supported loaders
+        loaders_str = ", ".join(supported_loaders) if supported_loaders else "None"
+        embed.add_field(name="Supported Loaders", value=loaders_str, inline=False)
 
-        embed.set_footer(text="Click the title to view on Modrinth • Type 'yes' to confirm or 'no' to cancel")
+        # Show latest 10 game versions
+        latest_versions = supported_game_versions[:10]
+        if len(supported_game_versions) > 10:
+            version_display = ", ".join(latest_versions) + f" (+{len(supported_game_versions) - 10} more)"
+        else:
+            version_display = ", ".join(latest_versions)
 
-        await ctx.send(embed=embed)
+        embed.add_field(name="Supported Game Versions", value=version_display, inline=False)
+        embed.add_field(name="Description", value=project.description[:300] + ("..." if len(project.description) > 300 else ""), inline=False)
+
+        embed.set_footer(text="Click the link above to view on Modrinth. React with ✅ to confirm or ❌ to cancel")
+
+        msg = await ctx.send(embed=embed)
+        await msg.add_reaction("✅")
+        await msg.add_reaction("❌")
+
+        def check(reaction, user):
+            return (user == ctx.author and
+                   str(reaction.emoji) in ["✅", "❌"] and
+                   reaction.message.id == msg.id)
+
+        try:
+            reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
+            await msg.delete()
+
+            if str(reaction.emoji) == "✅":
+                await self._ask_minecraft_version(ctx)
+            else:
+                await ctx.send("❌ Project addition cancelled.")
+                self._interactive_sessions.pop(ctx.author.id, None)
+        except asyncio.TimeoutError:
+            await msg.edit(content="❌ Confirmation timed out.", embed=None)
+            self._interactive_sessions.pop(ctx.author.id, None)
 
     async def _ask_minecraft_version(self, ctx):
         """Ask for Minecraft version filtering with project-specific versions."""
-        session = self._interactive_sessions.get(ctx.author.id)
-        if not session:
-            return
-
+        session = self._interactive_sessions[ctx.author.id]
         supported_versions = session['supported_game_versions']
 
         embed = discord.Embed(
-            title="🎮 Minecraft Version Selection",
-            description="Which Minecraft version(s) do you want to monitor for this project?",
+            title="Minecraft Version Filter",
+            description="Which Minecraft versions should be monitored?",
             color=discord.Color.blue()
         )
 
-        # Show supported versions (limit to first 20 for display)
-        versions_display = ", ".join(supported_versions[:20])
-        if len(supported_versions) > 20:
-            versions_display += f"\n... and {len(supported_versions) - 20} more"
+        # Show latest 8 supported versions as examples
+        latest_examples = supported_versions[:8]
+        examples_text = ", ".join(latest_examples)
+        if len(supported_versions) > 8:
+            examples_text += f" (and {len(supported_versions) - 8} more)"
 
         embed.add_field(
-            name="📋 Supported Versions",
-            value=versions_display,
+            name="Supported Versions",
+            value=examples_text,
             inline=False
         )
 
         embed.add_field(
-            name="📝 Instructions",
-            value="• Type specific versions separated by commas (e.g., `1.21.5, 1.20.6`)\n• Type `all` to monitor all supported versions\n• Type `latest` to monitor only the latest version",
+            name="Options",
+            value="1️⃣ All supported versions\n2️⃣ Specific versions (you'll specify)\n3️⃣ Latest major version only",
             inline=False
         )
 
-        embed.set_footer(text="Choose from the supported versions listed above")
+        embed.add_field(
+            name="📝 Note",
+            value="Choose versions that the mod actually supports. Selecting unsupported versions will result in no notifications.",
+            inline=False
+        )
 
-        await ctx.send(embed=embed)
+        msg = await ctx.send(embed=embed)
+        reactions = ["1️⃣", "2️⃣", "3️⃣"]
+        for reaction in reactions:
+            await msg.add_reaction(reaction)
+
+        def check(reaction, user):
+            return (user == ctx.author and
+                   str(reaction.emoji) in reactions and
+                   reaction.message.id == msg.id)
+
+        try:
+            reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
+            await msg.delete()
+
+            session = self._interactive_sessions[ctx.author.id]
+
+            if str(reaction.emoji) == "1️⃣":
+                session['minecraft_versions'] = None  # All versions
+                await self._ask_loader_type(ctx)
+            elif str(reaction.emoji) == "2️⃣":
+                session['step'] = 'specify_versions'
+                await ctx.send(f"Please specify the Minecraft versions you want to monitor.\n\n**Supported versions:** {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}\n\n**Format:** comma-separated (e.g., `{supported_versions[0]}, {supported_versions[1] if len(supported_versions) > 1 else supported_versions[0]}`)\n**Single version:** just type the version (e.g., `{supported_versions[0]}`)")
+            elif str(reaction.emoji) == "3️⃣":
+                # Use the latest version
+                latest_version = supported_versions[0] if supported_versions else "1.21"
+                session['minecraft_versions'] = [latest_version]
+                await self._ask_loader_type(ctx)
+
+        except asyncio.TimeoutError:
+            await msg.edit(content="❌ Selection timed out.", embed=None)
+            self._interactive_sessions.pop(ctx.author.id, None)
 
     async def _ask_loader_type(self, ctx):
         """Ask for loader type filtering with project-specific loaders."""
-        session = self._interactive_sessions.get(ctx.author.id)
-        if not session:
-            return
-
+        session = self._interactive_sessions[ctx.author.id]
         supported_loaders = session['supported_loaders']
 
         embed = discord.Embed(
-            title="⚙️ Loader Selection",
-            description="Which loader(s) do you want to monitor for this project?",
+            title="Loader Type Filter",
+            description="Which mod loaders should be monitored?",
             color=discord.Color.blue()
         )
 
         embed.add_field(
-            name="📋 Supported Loaders",
-            value=", ".join(supported_loaders),
+            name="Supported Loaders",
+            value=", ".join(supported_loaders) if supported_loaders else "None specified",
+            inline=False
+        )
+
+        # Build options based on what's actually supported
+        options = ["1️⃣ All supported loaders"]
+        reactions = ["1️⃣"]
+
+        # Add specific loader options only if they're supported
+        loader_map = {}
+        option_num = 2
+
+        common_loaders = ["fabric", "forge", "neoforge", "quilt"]
+        for loader in common_loaders:
+            if loader in supported_loaders:
+                emoji = f"{option_num}️⃣"
+                options.append(f"{emoji} {loader.title()} only")
+                reactions.append(emoji)
+                loader_map[emoji] = [loader]
+                option_num += 1
+
+        # Add custom selection option if there are multiple loaders
+        if len(supported_loaders) > 1:
+            custom_emoji = f"{option_num}️⃣"
+            options.append(f"{custom_emoji} Custom selection")
+            reactions.append(custom_emoji)
+
+        embed.add_field(
+            name="Options",
+            value="\n".join(options),
             inline=False
         )
 
         embed.add_field(
-            name="📝 Instructions",
-            value="• Type specific loaders separated by commas (e.g., `fabric, forge`)\n• Type `all` to monitor all supported loaders",
+            name="📝 Note",
+            value="Choose loaders that the mod actually supports. Selecting unsupported loaders will result in no notifications.",
             inline=False
         )
 
-        embed.set_footer(text="Choose from the supported loaders listed above")
+        msg = await ctx.send(embed=embed)
+        for reaction in reactions:
+            await msg.add_reaction(reaction)
 
-        await ctx.send(embed=embed)
+        def check(reaction, user):
+            return (user == ctx.author and
+                   str(reaction.emoji) in reactions and
+                   reaction.message.id == msg.id)
+
+        try:
+            reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
+            await msg.delete()
+
+            session = self._interactive_sessions[ctx.author.id]
+
+            if str(reaction.emoji) == "1️⃣":
+                session['loaders'] = None  # All loaders
+                await self._ask_release_channel(ctx)
+            elif str(reaction.emoji) in loader_map:
+                session['loaders'] = loader_map[str(reaction.emoji)]
+                await self._ask_release_channel(ctx)
+            elif str(reaction.emoji) == reactions[-1] and len(supported_loaders) > 1:  # Custom selection
+                session['step'] = 'specify_loaders'
+                await ctx.send(f"Please specify the loaders you want to monitor.\n\n**Supported loaders:** {', '.join(supported_loaders)}\n\n**Format:** comma-separated (e.g., `{supported_loaders[0]}{', ' + supported_loaders[1] if len(supported_loaders) > 1 else ''}`)\n**Single loader:** just type the loader name (e.g., `{supported_loaders[0]}`)")
+
+        except asyncio.TimeoutError:
+            await msg.edit(content="❌ Selection timed out.", embed=None)
+            self._interactive_sessions.pop(ctx.author.id, None)
 
     async def _ask_release_channel(self, ctx):
-        """Ask for release channel filtering."""
+        """Ask for release channel filtering with validation."""
+        session = self._interactive_sessions[ctx.author.id]
+
+        # Check what release types are available for the selected versions/loaders
+        available_types = set()
+        minecraft_versions = session.get('minecraft_versions')
+        loaders = session.get('loaders')
+
+        for version in session['all_versions']:
+            # Check if this version matches our filters
+            version_matches = True
+
+            if minecraft_versions:
+                if not any(mc_version in version.game_versions for mc_version in minecraft_versions):
+                    version_matches = False
+
+            if loaders:
+                if not any(loader in version.loaders for loader in loaders):
+                    version_matches = False
+
+            if version_matches:
+                available_types.add(version.version_type)
+
         embed = discord.Embed(
-            title="📢 Release Channel Selection",
-            description="Which release channels do you want to monitor?",
+            title="Release Channel Filter",
+            description="Which release channels should be monitored?",
             color=discord.Color.blue()
         )
 
+        # Show what's available for the selected filters
+        if available_types:
+            embed.add_field(
+                name="Available for your filters",
+                value=", ".join(sorted(available_types)),
+                inline=False
+            )
+
         embed.add_field(
-            name="🏷️ Available Channels",
-            value="• `release` - Stable releases only\n• `beta` - Beta releases\n• `alpha` - Alpha releases\n• `all` - All release types",
+            name="Options",
+            value="1️⃣ All channels\n2️⃣ Release only\n3️⃣ Beta and Release\n4️⃣ Alpha, Beta, and Release",
             inline=False
         )
 
-        embed.add_field(
-            name="📝 Instructions",
-            value="Type channels separated by commas (e.g., `release, beta`) or `all` for everything",
-            inline=False
-        )
+        # Add warning if there might be conflicts
+        warnings = []
+        channel_map = {
+            "2️⃣": ["release"],
+            "3️⃣": ["release", "beta"],
+            "4️⃣": ["release", "beta", "alpha"]
+        }
 
-        embed.set_footer(text="Note: If your selected MC version only has beta/alpha releases, you'll be warned")
+        for emoji, types in channel_map.items():
+            if not any(t in available_types for t in types):
+                option_name = {
+                    "2️⃣": "Release only",
+                    "3️⃣": "Beta and Release",
+                    "4️⃣": "All channels"
+                }[emoji]
+                warnings.append(f"⚠️ {option_name}: No matching versions found for your filters")
 
-        await ctx.send(embed=embed)
+        if warnings:
+            embed.add_field(
+                name="⚠️ Warnings",
+                value="\n".join(warnings),
+                inline=False
+            )
+
+        msg = await ctx.send(embed=embed)
+        reactions = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+        for reaction in reactions:
+            await msg.add_reaction(reaction)
+
+        def check(reaction, user):
+            return (user == ctx.author and
+                   str(reaction.emoji) in reactions and
+                   reaction.message.id == msg.id)
+
+        try:
+            reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
+            await msg.delete()
+
+            session = self._interactive_sessions[ctx.author.id]
+
+            channel_selection_map = {
+                "1️⃣": None,
+                "2️⃣": ["release"],
+                "3️⃣": ["release", "beta"],
+                "4️⃣": ["release", "beta", "alpha"]
+            }
+
+            selected_types = channel_selection_map[str(reaction.emoji)]
+            session['release_channels'] = selected_types
+
+            # Show warning if no versions match the selected criteria
+            if selected_types and not any(t in available_types for t in selected_types):
+                await ctx.send("⚠️ **Warning:** No versions found matching your selected release channels and filters. You may not receive any notifications until the mod releases versions matching your criteria.")
+
+            await self._ask_notification_channel(ctx)
+
+        except asyncio.TimeoutError:
+            await msg.edit(content="❌ Selection timed out.", embed=None)
+            self._interactive_sessions.pop(ctx.author.id, None)
 
     async def _ask_notification_channel(self, ctx):
         """Ask for notification channel."""
         embed = discord.Embed(
-            title="📺 Notification Channel",
-            description="Which channel should receive update notifications for this project?",
+            title="Notification Channel",
+            description="Which channel should receive update notifications?",
             color=discord.Color.blue()
         )
 
         embed.add_field(
-            name="📝 Instructions",
-            value="• Mention a channel (e.g., #updates)\n• Type a channel name (e.g., `updates`)\n• Type `here` to use this channel",
+            name="Instructions",
+            value="Please mention the channel (e.g., #updates) or type `current` to use the current channel:",
             inline=False
         )
-
-        embed.set_footer(text="You need manage channel permissions for the selected channel")
-
-        await ctx.send(embed=embed)
-
-    async def _ask_role_pings(self, ctx):
-        """Ask for role pings."""
-        embed = discord.Embed(
-            title="🔔 Role Notifications",
-            description="Which roles should be pinged when this project updates?",
-            color=discord.Color.blue()
-        )
-
-        embed.add_field(
-            name="📝 Instructions",
-            value="• Mention roles (e.g., @Moderators @Members)\n• Type role names separated by commas (e.g., `Moderators, Members`)\n• Type `none` for no role pings",
-            inline=False
-        )
-
-        embed.set_footer(text="Only mentionable roles will work")
 
         await ctx.send(embed=embed)
 
@@ -549,25 +658,53 @@ class ModrinthNotifier(commands.Cog):
             return message.author == ctx.author and message.channel == ctx.channel
 
         try:
-            response = await self.bot.wait_for('message', timeout=60.0, check=check)
-            session = self._interactive_sessions.get(ctx.author.id)
-            if not session:
+            msg = await self.bot.wait_for('message', timeout=60.0, check=check)
+
+            session = self._interactive_sessions[ctx.author.id]
+
+            if msg.content.lower().strip() == 'current':
+                session['notification_channel'] = ctx.channel
+            elif msg.channel_mentions:
+                session['notification_channel'] = msg.channel_mentions[0]
+            else:
+                await ctx.send("❌ Invalid channel. Please mention a channel (e.g., #updates) or type `current`.")
                 return
 
-            roles = []
-            if response.content.lower() != "none":
-                # Parse role mentions
-                roles.extend(response.role_mentions)
+            await self._ask_role_pings(ctx)
 
-                # Parse role names if no mentions
-                if not roles and response.content.lower() != "none":
-                    role_names = [name.strip() for name in response.content.split(',')]
-                    for role_name in role_names:
-                        role = discord.utils.get(ctx.guild.roles, name=role_name)
-                        if role:
-                            roles.append(role)
+        except asyncio.TimeoutError:
+            await ctx.send("❌ Channel selection timed out.")
+            self._interactive_sessions.pop(ctx.author.id, None)
 
-            session['roles'] = roles
+    async def _ask_role_pings(self, ctx):
+        """Ask for role pings."""
+        embed = discord.Embed(
+            title="Role Notifications",
+            description="Which roles should be pinged for updates?",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="Instructions",
+            value="Mention the roles you want to ping (e.g., @Mod Updates @Everyone) or type `none` for no pings:",
+            inline=False
+        )
+
+        await ctx.send(embed=embed)
+
+        def check(message):
+            return message.author == ctx.author and message.channel == ctx.channel
+
+        try:
+            msg = await self.bot.wait_for('message', timeout=60.0, check=check)
+
+            session = self._interactive_sessions[ctx.author.id]
+
+            if msg.content.lower().strip() == 'none':
+                session['roles'] = []
+            else:
+                session['roles'] = msg.role_mentions
+
             await self._finalize_setup(ctx)
 
         except asyncio.TimeoutError:
@@ -580,91 +717,97 @@ class ModrinthNotifier(commands.Cog):
         if not session:
             return
 
-        try:
-            # Create monitored project
+        project = session['project']
+        config = self._get_guild_config(ctx.guild.id)
+
+        # Create monitored project if it doesn't exist
+        if project.id not in config.projects:
             monitored_project = MonitoredProject(
-                project_id=session['project'].id,
-                name=session['project'].name,
-                game_versions=session['game_versions'],
-                loaders=session['loaders'],
-                release_channels=session['release_channels'],
-                role_ids=[role.id for role in session.get('roles', [])],
-                last_version=None
+                id=project.id,
+                name=project.name,
+                added_by=ctx.author.id
             )
+            config.projects[project.id] = monitored_project
+        else:
+            monitored_project = config.projects[project.id]
 
-            # Add to guild config
-            guild_config = self._get_guild_config(ctx.guild.id)
-            guild_config.projects[session['project'].id] = monitored_project
-            guild_config.channel_id = session['notification_channel'].id
+        # Create channel monitor
+        channel_monitor = ChannelMonitor(
+            channel_id=session['notification_channel'].id,
+            role_ids=[role.id for role in session['roles']],
+            required_loaders=session.get('loaders'),
+            required_game_versions=session.get('minecraft_versions'),
+            required_version_types=session.get('release_channels')
+        )
 
-            # Get the latest version for initial setup
-            try:
-                versions = await self.api.get_project_versions(
-                    session['project'].id,
-                    loaders=session['loaders'],
-                    game_versions=session['game_versions']
-                )
+        monitored_project.channels[session['notification_channel'].id] = channel_monitor
 
-                if versions:
-                    # Filter by release channels
-                    filtered_versions = [v for v in versions if v.version_type in session['release_channels']]
+        # Save configuration
+        await self._save_guild_config(ctx.guild.id)
 
-                    if filtered_versions:
-                        latest_version = filtered_versions[0]
-                        monitored_project.last_version = latest_version.id
+        # Send confirmation
+        embed = discord.Embed(
+            title="✅ Monitoring Setup Complete",
+            description=f"Successfully set up monitoring for **{project.name}**",
+            color=discord.Color.green()
+        )
 
-                        # Send initial notification
-                        embed = discord.Embed(
-                            title=f"✅ Now Monitoring: {session['project'].name}",
-                            description=f"Latest version: **{latest_version.version_number}** ({latest_version.version_type})",
-                            color=discord.Color.green(),
-                            url=f"https://modrinth.com/mod/{session['project'].slug}"
-                        )
+        embed.add_field(name="Channel", value=session['notification_channel'].mention, inline=True)
+        embed.add_field(name="Roles", value=humanize_list([role.mention for role in session['roles']]) if session['roles'] else "None", inline=True)
 
-                        embed.add_field(name="🎮 Monitoring Versions", value=", ".join(session['game_versions'][:5]), inline=True)
-                        embed.add_field(name="⚙️ Monitoring Loaders", value=", ".join(session['loaders']), inline=True)
-                        embed.add_field(name="📢 Release Channels", value=", ".join(session['release_channels']), inline=True)
-                        embed.add_field(name="📺 Notification Channel", value=session['notification_channel'].mention, inline=True)
+        if session.get('minecraft_versions'):
+            embed.add_field(name="Minecraft Versions", value=", ".join(session['minecraft_versions']), inline=False)
+        else:
+            embed.add_field(name="Minecraft Versions", value="All supported versions", inline=False)
 
-                        if session.get('roles'):
-                            embed.add_field(name="🔔 Role Pings", value=", ".join([r.name for r in session['roles']]), inline=True)
+        if session.get('loaders'):
+            embed.add_field(name="Loaders", value=", ".join(session['loaders']), inline=False)
+        else:
+            embed.add_field(name="Loaders", value="All supported loaders", inline=False)
 
-                        if session['project'].icon_url:
-                            embed.set_thumbnail(url=session['project'].icon_url)
+        if session.get('release_channels'):
+            embed.add_field(name="Release Channels", value=", ".join(session['release_channels']), inline=False)
+        else:
+            embed.add_field(name="Release Channels", value="All channels", inline=False)
 
-                        embed.set_footer(text="Monitoring started! You'll be notified of new updates.")
+        await ctx.send(embed=embed)
 
-                        await ctx.send(embed=embed)
+        # Send initial version to confirm monitoring is working
+        try:
+            versions = await self.api.get_project_versions(project.id, limit=5)
+            if versions:
+                # Find the first version that matches filters
+                matching_version = None
+                for version in versions:
+                    if version.matches_filters(
+                        session.get('loaders'),
+                        session.get('minecraft_versions'),
+                        session.get('release_channels')
+                    ):
+                        matching_version = version
+                        break
 
-                        # Also send a notification to the monitoring channel if it's different
-                        if session['notification_channel'] != ctx.channel:
-                            update_embed = discord.Embed(
-                                title=f"🔄 {session['project'].name} - Monitoring Started",
-                                description=f"Now monitoring this project for updates!\nCurrent version: **{latest_version.version_number}**",
-                                color=discord.Color.blue(),
-                                url=f"https://modrinth.com/mod/{session['project'].slug}"
-                            )
+                if matching_version:
+                    update_embed = create_update_embed(
+                        project,
+                        matching_version,
+                        channel_monitor,
+                        is_initial=True
+                    )
 
-                            if session['project'].icon_url:
-                                update_embed.set_thumbnail(url=session['project'].icon_url)
+                    content = None
+                    if session['roles']:
+                        content = " ".join([role.mention for role in session['roles']])
 
-                            content = None
-                            if session.get('roles'):
-                                content = " ".join([role.mention for role in session['roles']])
+                    await session['notification_channel'].send(content=content, embed=update_embed)
 
-                            await session['notification_channel'].send(content=content, embed=update_embed)
-
-            except Exception as e:
-                log.error(f"Error getting initial version: {e}")
-                # Still save the configuration even if we can't get the latest version
-                pass
-
-            # Save configuration
-            await self._save_guild_config(ctx.guild.id)
-
+                    # Update last version
+                    monitored_project.last_version = matching_version.id
+                    await self._save_guild_config(ctx.guild.id)
+                else:
+                    await ctx.send("⚠️ **Note:** No existing versions match your filter criteria. You'll receive notifications when new matching versions are released.")
         except Exception as e:
-            log.error(f"Error finalizing setup: {e}")
-            await ctx.send(f"❌ Error setting up monitoring: {e}")
+            log.error(f"Error sending initial notification: {e}")
 
         # Clean up session
         self._interactive_sessions.pop(ctx.author.id, None)
@@ -672,462 +815,230 @@ class ModrinthNotifier(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         """Handle interactive session messages."""
-        if message.author.bot or message.author.id not in self._interactive_sessions:
+        if message.author.bot:
             return
 
-        session = self._interactive_sessions[message.author.id]
-        if message.channel.id != session.get('channel_id'):
+        session = self._interactive_sessions.get(message.author.id)
+        if not session:
             return
 
-        try:
-            # Handle project confirmation
-            if session.get('step') == 'confirm_project':
-                if message.content.lower() in ['yes', 'y', 'confirm']:
-                    session['step'] = 'minecraft_version'
-                    await self._ask_minecraft_version(message.channel)
-                elif message.content.lower() in ['no', 'n', 'cancel']:
-                    await message.channel.send("❌ Project addition cancelled.")
-                    self._interactive_sessions.pop(message.author.id, None)
-                return
+        # Handle version specification
+        if session.get('step') == 'specify_versions':
+            try:
+                # Clean up the input
+                versions_input = message.content.strip()
 
-            # Handle Minecraft version selection
-            elif session.get('step') == 'minecraft_version':
-                content = message.content.strip()
-                supported_versions = session['supported_game_versions']
-
-                if content.lower() == 'all':
-                    game_versions = supported_versions
-                elif content.lower() == 'latest':
-                    game_versions = [supported_versions[0]] if supported_versions else []
+                # Handle single version or comma-separated versions
+                if ',' in versions_input:
+                    versions = [v.strip() for v in versions_input.split(',')]
                 else:
-                    # Parse comma-separated versions
-                    requested_versions = [v.strip() for v in content.split(',')]
-                    game_versions = []
-                    invalid_versions = []
+                    versions = [versions_input.strip()]
 
-                    for version in requested_versions:
-                        if version in supported_versions:
-                            game_versions.append(version)
-                        else:
-                            invalid_versions.append(version)
+                # Remove empty strings
+                versions = [v for v in versions if v]
 
-                    if invalid_versions:
-                        await message.channel.send(
-                            f"❌ Invalid versions: {', '.join(invalid_versions)}\n"
-                            f"Supported versions: {', '.join(supported_versions[:10])}"
-                        )
-                        return
-
-                if not game_versions:
-                    await message.channel.send("❌ No valid versions selected. Please try again.")
+                if not versions:
+                    await message.channel.send("❌ Please specify at least one version.")
                     return
 
-                session['game_versions'] = game_versions
-                session['step'] = 'loader_type'
+                supported_versions = session['supported_game_versions']
+
+                # Validate that all specified versions are supported
+                invalid_versions = [v for v in versions if v not in supported_versions]
+                if invalid_versions:
+                    await message.channel.send(
+                        f"❌ **Invalid versions:** {', '.join(invalid_versions)}\n\n**Supported versions:** {', '.join(supported_versions[:15])}{'...' if len(supported_versions) > 15 else ''}\n\nPlease try again with supported versions only.")
+                    return
+
+                session['minecraft_versions'] = versions
+                session['step'] = None  # Clear the step
                 await self._ask_loader_type(message.channel)
                 return
 
-            # Handle loader selection
-            elif session.get('step') == 'loader_type':
-                content = message.content.strip()
-                supported_loaders = session['supported_loaders']
+            except Exception as e:
+                log.error(f"Error processing versions: {e}")
+                await message.channel.send(
+                    "❌ Invalid format. Please use comma-separated versions (e.g., `1.21.4, 1.21.3`) or a single version (e.g., `1.21.4`).")
+                return
 
-                if content.lower() == 'all':
-                    loaders = supported_loaders
+        # Handle loader specification
+        elif session.get('step') == 'specify_loaders':
+            try:
+                # Clean up the input
+                loaders_input = message.content.strip().lower()
+
+                # Handle single loader or comma-separated loaders
+                if ',' in loaders_input:
+                    loaders = [l.strip() for l in loaders_input.split(',')]
                 else:
-                    # Parse comma-separated loaders
-                    requested_loaders = [l.strip().lower() for l in content.split(',')]
-                    loaders = []
-                    invalid_loaders = []
+                    loaders = [loaders_input.strip()]
 
-                    for loader in requested_loaders:
-                        # Find matching loader (case-insensitive)
-                        matching_loader = next((l for l in supported_loaders if l.lower() == loader), None)
-                        if matching_loader:
-                            loaders.append(matching_loader)
-                        else:
-                            invalid_loaders.append(loader)
-
-                    if invalid_loaders:
-                        await message.channel.send(
-                            f"❌ Invalid loaders: {', '.join(invalid_loaders)}\n"
-                            f"Supported loaders: {', '.join(supported_loaders)}"
-                        )
-                        return
+                # Remove empty strings
+                loaders = [l for l in loaders if l]
 
                 if not loaders:
-                    await message.channel.send("❌ No valid loaders selected. Please try again.")
+                    await message.channel.send("❌ Please specify at least one loader.")
+                    return
+
+                supported_loaders = session['supported_loaders']
+
+                # Validate that all specified loaders are supported
+                invalid_loaders = [l for l in loaders if l not in supported_loaders]
+                if invalid_loaders:
+                    await message.channel.send(
+                        f"❌ **Invalid loaders:** {', '.join(invalid_loaders)}\n\n**Supported loaders:** {', '.join(supported_loaders)}\n\nPlease try again with supported loaders only.")
                     return
 
                 session['loaders'] = loaders
-                session['step'] = 'release_channel'
+                session['step'] = None  # Clear the step
                 await self._ask_release_channel(message.channel)
                 return
 
-            # Handle release channel selection
-            elif session.get('step') == 'release_channel':
-                content = message.content.strip().lower()
-
-                if content == 'all':
-                    release_channels = ['release', 'beta', 'alpha']
-                else:
-                    # Parse comma-separated channels
-                    requested_channels = [c.strip().lower() for c in content.split(',')]
-                    valid_channels = ['release', 'beta', 'alpha']
-                    release_channels = []
-                    invalid_channels = []
-
-                    for channel in requested_channels:
-                        if channel in valid_channels:
-                            release_channels.append(channel)
-                        else:
-                            invalid_channels.append(channel)
-
-                    if invalid_channels:
-                        await message.channel.send(
-                            f"❌ Invalid channels: {', '.join(invalid_channels)}\n"
-                            f"Valid channels: release, beta, alpha"
-                        )
-                        return
-
-                if not release_channels:
-                    await message.channel.send("❌ No valid release channels selected. Please try again.")
-                    return
-
-                # Check if selected versions have releases in selected channels
-                try:
-                    versions = await self.api.get_project_versions(
-                        session['project'].id,
-                        loaders=session['loaders'],
-                        game_versions=session['game_versions']
-                    )
-
-                    available_types = set(v.version_type for v in versions)
-                    selected_types = set(release_channels)
-
-                    if not available_types.intersection(selected_types):
-                        warning_msg = (
-                            f"⚠️ **Warning**: No {', '.join(release_channels)} versions found for your selected MC versions and loaders.\n"
-                            f"Available release types: {', '.join(available_types) if available_types else 'None'}\n"
-                            f"Continue anyway? (yes/no)"
-                        )
-                        await message.channel.send(warning_msg)
-                        session['step'] = 'confirm_warning'
-                        session['pending_release_channels'] = release_channels
-                        return
-
-                except Exception as e:
-                    log.error(f"Error checking versions: {e}")
-                    # Continue anyway if we can't check
-
-                session['release_channels'] = release_channels
-                session['step'] = 'notification_channel'
-                await self._ask_notification_channel(message.channel)
+            except Exception as e:
+                log.error(f"Error processing loaders: {e}")
+                await message.channel.send(
+                    "❌ Invalid format. Please use comma-separated loaders (e.g., `fabric, forge`) or a single loader (e.g., `fabric`).")
                 return
 
-            # Handle warning confirmation
-            elif session.get('step') == 'confirm_warning':
-                if message.content.lower() in ['yes', 'y']:
-                    session['release_channels'] = session['pending_release_channels']
-                    session['step'] = 'notification_channel'
-                    await self._ask_notification_channel(message.channel)
-                elif message.content.lower() in ['no', 'n']:
-                    session['step'] = 'release_channel'
-                    await self._ask_release_channel(message.channel)
-                else:
-                    await message.channel.send("Please type 'yes' or 'no'.")
-                return
-
-            # Handle notification channel selection
-            elif session.get('step') == 'notification_channel':
-                channel = None
-
-                # Try channel mention first
-                if message.channel_mentions:
-                    channel = message.channel_mentions[0]
-                elif message.content.lower() == 'here':
-                    channel = message.channel
-                else:
-                    # Try to find by name
-                    channel_name = message.content.strip().replace('#', '')
-                    channel = discord.utils.get(message.guild.channels, name=channel_name)
-
-                if not channel or not isinstance(channel, discord.TextChannel):
-                    await message.channel.send("❌ Invalid channel. Please mention a text channel, type a channel name, or use 'here'.")
-                    return
-
-                # Check permissions
-                if not channel.permissions_for(message.guild.me).send_messages:
-                    await message.channel.send(f"❌ I don't have permission to send messages in {channel.mention}.")
-                    return
-
-                session['notification_channel'] = channel
-                session['step'] = 'role_pings'
-                await self._ask_role_pings(message.channel)
-                return
-
-        except Exception as e:
-            log.error(f"Error in message handler: {e}")
-            await message.channel.send("❌ An error occurred. Please try again.")
-            self._interactive_sessions.pop(message.author.id, None)
-
-    # Rest of the commands remain the same...
+    # Additional commands
     @modrinth.command(name="list")
     async def list_projects(self, ctx):
         """List all monitored projects in this server."""
-        guild_config = self._get_guild_config(ctx.guild.id)
+        config = self._get_guild_config(ctx.guild.id)
 
-        if not guild_config.projects:
-            await ctx.send("📭 No projects are currently being monitored in this server.")
+        if not config.projects:
+            await ctx.send("❌ No projects are currently being monitored in this server.")
             return
 
         embed = discord.Embed(
-            title="📋 Monitored Projects",
+            title="Monitored Projects",
             color=discord.Color.blue()
         )
 
-        for project_id, monitored_project in guild_config.projects.items():
+        for project_id, project in config.projects.items():
+            channels = []
+            for channel_id, monitor in project.channels.items():
+                channel = ctx.guild.get_channel(channel_id)
+                if channel:
+                    filter_info = []
+                    if monitor.required_game_versions:
+                        filter_info.append(f"MC: {', '.join(monitor.required_game_versions[:3])}{'...' if len(monitor.required_game_versions) > 3 else ''}")
+                    if monitor.required_loaders:
+                        filter_info.append(f"Loaders: {', '.join(monitor.required_loaders)}")
+                    if monitor.required_version_types:
+                        filter_info.append(f"Types: {', '.join(monitor.required_version_types)}")
+
+                    filter_str = f" ({'; '.join(filter_info)})" if filter_info else ""
+                    channels.append(f"{channel.mention}{filter_str}")
+
             embed.add_field(
-                name=monitored_project.name,
-                value=(
-                    f"**Versions:** {', '.join(monitored_project.game_versions[:3])}{'...' if len(monitored_project.game_versions) > 3 else ''}\n"
-                    f"**Loaders:** {', '.join(monitored_project.loaders)}\n"
-                    f"**Channels:** {', '.join(monitored_project.release_channels)}"
-                ),
-                inline=True
+                name=project.name,
+                value=f"ID: `{project_id}`\nChannels: {chr(10).join(channels) if channels else 'None'}",
+                inline=False
             )
 
-        channel = ctx.guild.get_channel(guild_config.channel_id) if guild_config.channel_id else None
-        if channel:
-            embed.set_footer(text=f"Updates sent to #{channel.name}")
-
         await ctx.send(embed=embed)
 
-    @modrinth.command(name="remove", aliases=["delete", "del"])
+    @modrinth.command(name="remove", aliases=["rm", "delete"])
     @commands.admin_or_permissions(manage_guild=True)
-    async def remove_project(self, ctx, *, project_name: str):
+    async def remove_project(self, ctx, project_id: str):
         """Remove a project from monitoring."""
-        guild_config = self._get_guild_config(ctx.guild.id)
+        config = self._get_guild_config(ctx.guild.id)
 
-        # Find project by name (case-insensitive)
-        project_to_remove = None
-        for project_id, monitored_project in guild_config.projects.items():
-            if monitored_project.name.lower() == project_name.lower():
-                project_to_remove = (project_id, monitored_project)
-                break
-
-        if not project_to_remove:
-            await ctx.send(f"❌ Project '{project_name}' not found in monitoring list.")
+        if project_id not in config.projects:
+            await ctx.send(f"❌ Project `{project_id}` is not being monitored in this server.")
             return
 
-        project_id, monitored_project = project_to_remove
-        del guild_config.projects[project_id]
+        project_name = config.projects[project_id].name
+        del config.projects[project_id]
         await self._save_guild_config(ctx.guild.id)
 
-        embed = discord.Embed(
-            title="✅ Project Removed",
-            description=f"**{monitored_project.name}** is no longer being monitored.",
-            color=discord.Color.green()
-        )
-
-        await ctx.send(embed=embed)
-
-    @modrinth.command(name="channel")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def set_channel(self, ctx, channel: discord.TextChannel = None):
-        """Set the notification channel for this server."""
-        if channel is None:
-            channel = ctx.channel
-
-        # Check permissions
-        if not channel.permissions_for(ctx.guild.me).send_messages:
-            await ctx.send(f"❌ I don't have permission to send messages in {channel.mention}.")
-            return
-
-        guild_config = self._get_guild_config(ctx.guild.id)
-        guild_config.channel_id = channel.id
-        await self._save_guild_config(ctx.guild.id)
-
-        await ctx.send(f"✅ Notification channel set to {channel.mention}")
-
-    @modrinth.command(name="toggle")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def toggle_monitoring(self, ctx):
-        """Toggle monitoring on/off for this server."""
-        guild_config = self._get_guild_config(ctx.guild.id)
-        guild_config.enabled = not guild_config.enabled
-        await self._save_guild_config(ctx.guild.id)
-
-        status = "enabled" if guild_config.enabled else "disabled"
-        await ctx.send(f"✅ Monitoring {status} for this server.")
+        await ctx.send(f"✅ Removed **{project_name}** from monitoring.")
 
     @modrinth.command(name="test")
     async def test_project(self, ctx, project_id: str):
         """Force check for updates and send the latest version."""
+        config = self._get_guild_config(ctx.guild.id)
+
+        if project_id not in config.projects:
+            await ctx.send(f"❌ Project `{project_id}` is not being monitored in this server.")
+            return
+
+        project = config.projects[project_id]
+
         async with ctx.typing():
             try:
                 project_info = await self.api.get_project(project_id)
-                versions = await self.api.get_project_versions(project_id, limit=1)
+                versions = await self.api.get_project_versions(project_id, limit=5)
 
                 if not versions:
-                    await ctx.send("❌ No versions found for this project.")
+                    await ctx.send(f"❌ No versions found for project `{project_id}`.")
                     return
 
-                latest_version = versions[0]
+                # Send test notifications to all monitored channels
+                notifications_sent = 0
+                for channel_id, monitor in project.channels.items():
+                    channel = ctx.guild.get_channel(channel_id)
+                    if not channel:
+                        continue
 
-                embed = discord.Embed(
-                    title=f"🔍 Test: {project_info.name}",
-                    description=f"**Latest Version:** {latest_version.version_number}\n**Type:** {latest_version.version_type.title()}",
-                    color=discord.Color.blue(),
-                    timestamp=latest_version.date_published,
-                    url=f"https://modrinth.com/mod/{project_info.slug}"
-                )
+                    # Find a version that matches filters
+                    matching_version = None
+                    for version in versions:
+                        if version.matches_filters(
+                            monitor.required_loaders,
+                            monitor.required_game_versions,
+                            monitor.required_version_types
+                        ):
+                            matching_version = version
+                            break
 
-                if latest_version.changelog:
-                    changelog = latest_version.changelog[:500] + "..." if len(latest_version.changelog) > 500 else latest_version.changelog
-                    embed.add_field(name="📝 Changelog", value=changelog, inline=False)
+                    if not matching_version:
+                        await ctx.send(f"⚠️ No versions match the filters for {channel.mention}")
+                        continue
 
-                embed.add_field(name="🎮 Game Versions", value=", ".join(latest_version.game_versions[:5]), inline=True)
-                embed.add_field(name="⚙️ Loaders", value=", ".join(latest_version.loaders), inline=True)
-                embed.add_field(name="💾 Downloads", value=str(latest_version.downloads), inline=True)
+                    embed = create_update_embed(
+                        project_info,
+                        matching_version,
+                        monitor,
+                        is_initial=True,
+                        title_prefix="🧪 Test: "
+                    )
 
-                if project_info.icon_url:
-                    embed.set_thumbnail(url=project_info.icon_url)
+                    await channel.send(embed=embed)
+                    notifications_sent += 1
 
-                embed.set_footer(text="This is a test notification")
-
-                await ctx.send(embed=embed)
+                if notifications_sent > 0:
+                    await ctx.send(f"✅ Test notifications sent for **{project_info.name}** to {notifications_sent} channel(s)")
+                else:
+                    await ctx.send(f"❌ No test notifications sent - no versions match any channel filters")
 
             except ModrinthAPIError as e:
                 await ctx.send(f"❌ Error testing project: {e}")
 
-    @modrinth.group(name="watch", aliases=["personal"])
-    async def personal_watch(self, ctx):
-        """Personal watchlist commands (DM notifications)."""
-        pass
-
-    @personal_watch.command(name="add")
-    async def add_personal_watch(self, ctx, *, project_name: str):
-        """Add a project to your personal watchlist."""
-        # Similar to server add but saves to user config
+    @modrinth.command(name="search")
+    async def search_projects(self, ctx, *, query: str):
+        """Search for projects on Modrinth."""
         async with ctx.typing():
             try:
-                search_results = await self.api.search_projects(project_name, limit=5)
-                if not search_results:
-                    await ctx.send("❌ No projects found with that name.")
+                results = await self.api.search_projects(query, limit=10)
+                if not results:
+                    await ctx.send(f"❌ No projects found matching '{query}'.")
                     return
             except ModrinthAPIError as e:
-                await ctx.send(f"❌ Error searching for projects: {e}")
+                await ctx.send(f"❌ Error searching: {e}")
                 return
 
-        # For personal watchlist, use simpler setup (monitor all versions/loaders/channels)
-        if len(search_results) == 1:
-            selected_project = search_results[0]
-        else:
-            # Show selection menu (similar to server add)
-            embed = discord.Embed(
-                title="Multiple Projects Found",
-                description="Please select a project by reacting:",
-                color=discord.Color.blue()
-            )
-
-            for i, project in enumerate(search_results[:5], 1):
-                embed.add_field(
-                    name=f"{i}. {project.name}",
-                    value=f"Type: {project.project_type.title()}\n{project.description[:100]}...",
-                    inline=False
-                )
-
-            msg = await ctx.send(embed=embed)
-            reactions = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-            for i in range(min(len(search_results), 5)):
-                await msg.add_reaction(reactions[i])
-
-            def check(reaction, user):
-                return (user == ctx.author and
-                        str(reaction.emoji) in reactions[:len(search_results)] and
-                        reaction.message.id == msg.id)
-
-            try:
-                reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-                selected_index = reactions.index(str(reaction.emoji))
-                selected_project = search_results[selected_index]
-                await msg.delete()
-            except asyncio.TimeoutError:
-                await msg.edit(content="❌ Selection timed out.", embed=None)
-                return
-
-        # Add to personal watchlist with default settings
-        user_config = self._get_user_config(ctx.author.id)
-
-        if selected_project.id in user_config.projects:
-            await ctx.send(f"❌ You're already watching **{selected_project.name}**.")
-            return
-
-        monitored_project = MonitoredProject(
-            project_id=selected_project.id,
-            name=selected_project.name,
-            game_versions=["all"],  # Monitor all versions for personal watchlist
-            loaders=["all"],        # Monitor all loaders
-            release_channels=["release", "beta", "alpha"],  # Monitor all channels
-            role_ids=[],            # No roles for personal
-            last_version=None
-        )
-
-        user_config.projects[selected_project.id] = monitored_project
-        await self._save_user_config(ctx.author.id)
-
         embed = discord.Embed(
-            title="✅ Added to Personal Watchlist",
-            description=f"**{selected_project.name}** added to your personal watchlist!\nYou'll receive DM notifications for all updates.",
-            color=discord.Color.green(),
-            url=f"https://modrinth.com/mod/{selected_project.slug}"
-        )
-
-        await ctx.send(embed=embed)
-
-    @personal_watch.command(name="list")
-    async def list_personal_watch(self, ctx):
-        """List your personal watchlist."""
-        user_config = self._get_user_config(ctx.author.id)
-
-        if not user_config.projects:
-            await ctx.send("📭 Your personal watchlist is empty.")
-            return
-
-        embed = discord.Embed(
-            title="👤 Your Personal Watchlist",
+            title=f"Search Results for '{query}'",
             color=discord.Color.blue()
         )
 
-        for project_id, monitored_project in user_config.projects.items():
+        for project in results[:5]:
             embed.add_field(
-                name=monitored_project.name,
-                value="Monitoring all updates via DM",
-                inline=True
+                name=f"{project.name} ({project.project_type})",
+                value=f"ID: `{project.id}`\nDownloads: {project.downloads:,}\n{project.description[:100]}...",
+                inline=False
             )
 
-        embed.set_footer(text="Updates sent via Direct Message")
         await ctx.send(embed=embed)
-
-    @personal_watch.command(name="remove")
-    async def remove_personal_watch(self, ctx, *, project_name: str):
-        """Remove a project from your personal watchlist."""
-        user_config = self._get_user_config(ctx.author.id)
-
-        # Find project by name
-        project_to_remove = None
-        for project_id, monitored_project in user_config.projects.items():
-            if monitored_project.name.lower() == project_name.lower():
-                project_to_remove = (project_id, monitored_project)
-                break
-
-        if not project_to_remove:
-            await ctx.send(f"❌ Project '{project_name}' not found in your watchlist.")
-            return
-
-        project_id, monitored_project = project_to_remove
-        del user_config.projects[project_id]
-        await self._save_user_config(ctx.author.id)
-
-        await ctx.send(f"✅ **{monitored_project.name}** removed from your personal watchlist.")
