@@ -853,7 +853,7 @@ class ModrinthNotifier(commands.Cog):
                 session['minecraft_versions'] = versions
                 session['step'] = None  # Clear the step
                 await self._ask_loader_type(message.channel)
-                return
+                return  # ADD THIS LINE - This was missing!
 
             except Exception as e:
                 log.error(f"Error processing versions: {e}")
@@ -892,7 +892,7 @@ class ModrinthNotifier(commands.Cog):
                 session['loaders'] = loaders
                 session['step'] = None  # Clear the step
                 await self._ask_release_channel(message.channel)
-                return
+                return  # ADD THIS LINE - This was missing too!
 
             except Exception as e:
                 log.error(f"Error processing loaders: {e}")
