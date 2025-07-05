@@ -1,4 +1,4 @@
-from modrinthnotifier import ModrinthNotifier
+from .modrinthnotifier import ModrinthNotifier
 
 async def setup(bot):
     """Setup function for the cog."""
