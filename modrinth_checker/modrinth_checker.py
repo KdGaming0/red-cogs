@@ -6,6 +6,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union, Any
 import discord
+from discord import SelectOption, Interaction
+from discord.ui import View, Select
 from redbot.core import commands, Config, checks
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 from redbot.core.utils.predicates import MessagePredicate
@@ -1201,43 +1203,6 @@ class VersionSelect(discord.ui.Select):
             description="Version selection timed out. Please try again.",
             color=0xff0000
         )
-        # Note: We can't edit the message here since we don't have the interaction
-
-
-class VersionSelect(discord.ui.Select):
-    def __init__(self, versions):
-        options = [
-            discord.SelectOption(
-                label=version,
-                value=version,
-                description=f"Minecraft {version}"
-            )
-            for version in versions[:25]  # Ensure we don't exceed Discord's limit
-        ]
-
-        super().__init__(
-            placeholder="Select Minecraft versions...",
-            min_values=1,
-            max_values=min(len(options), 25),
-            options=options
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.selected_versions = self.values
-
-        embed = discord.Embed(
-            title="Select Specific Minecraft Versions",
-            description="Select up to 25 versions to monitor:",
-            color=0x1bd96a
-        )
-
-        embed.add_field(
-            name="Selected Versions",
-            value=", ".join(self.values) if self.values else "None selected",
-            color=0x1bd96a
-        )
-
-        await interaction.response.edit_message(embed=embed, view=self.view)
 
 
 class LoaderView(discord.ui.View):
