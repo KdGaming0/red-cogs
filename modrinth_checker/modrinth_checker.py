@@ -1008,6 +1008,106 @@ class ConfirmView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
+class _VersionSelect(discord.ui.Select):
+    """The actual drop-down element that lists all supported Minecraft versions."""
+
+    def __init__(self, versions: List[str]):
+        options = [discord.SelectOption(label=v, value=v) for v in versions]
+
+        super().__init__(
+            placeholder="Pick one or more Minecraft versions…",
+            min_values=1,
+            max_values=len(options),
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        # Store the result in the parent view so the wizard can continue.
+        view: "VersionSelectView" = self.view  # type: ignore
+        view.selected_versions = self.values
+        await interaction.response.send_message(
+            f"✅ Selected: {', '.join(self.values)}\n"
+            f"Press **Continue** to proceed or **Cancel** to abort.",
+            ephemeral=True,
+        )
+
+
+class VersionSelectView(discord.ui.View):
+    """
+    Shown after the user chooses “Specific versions”.
+
+    Parameters
+    ----------
+    versions
+        Every MC version the current Modrinth project supports.
+    has_snapshots
+        Unused for now, but kept so the caller signature doesn't break.
+    parent_view
+        The view that invoked us. We push the result back into it so the rest of
+        the setup flow keeps working.
+    """
+
+    def __init__(
+        self,
+        versions: List[str],
+        has_snapshots: bool,
+        parent_view: discord.ui.View,
+        *,
+        timeout: int = 120,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.parent_view: discord.ui.View = parent_view
+        self.has_snapshots = has_snapshots
+        self.selected_versions: List[str] = []
+
+        # 1) the dropdown itself
+        self.add_item(_VersionSelect(versions))
+
+        # 2) continue / cancel buttons
+        self.add_item(
+            discord.ui.Button(
+                label="✅ Continue",
+                style=discord.ButtonStyle.green,
+                custom_id="modrinth:continue",
+                row=1,
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="❌ Cancel",
+                style=discord.ButtonStyle.red,
+                custom_id="modrinth:cancel",
+                row=1,
+            )
+        )
+
+    # ------------------------------------------------------------------ buttons
+
+    @discord.ui.button(label="✅ Continue", style=discord.ButtonStyle.green, row=1)
+    async def _continue(  # type: ignore[override]
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if not self.selected_versions:
+            await interaction.response.send_message(
+                "You need to select at least one version first.", ephemeral=True
+            )
+            return
+
+        # Push the data back into the invoking view so the wizard can carry on.
+        setattr(self.parent_view, "selected_versions", self.selected_versions)
+
+        await interaction.response.defer(ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red, row=1)
+    async def _cancel(  # type: ignore[override]
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        # Signal the parent that the flow was aborted.
+        setattr(self.parent_view, "cancelled", True)
+
+        await interaction.response.send_message("Setup cancelled.", ephemeral=True)
+        self.stop()
 
 class MinecraftVersionView(discord.ui.View):
     def __init__(self, all_versions, release_versions, has_snapshots):
