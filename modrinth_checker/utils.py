@@ -50,13 +50,27 @@ def compare_versions(version1: str, version2: str) -> int:
 
 def is_snapshot(version_string: str) -> bool:
     """Check if a version string represents a snapshot version."""
-    snapshot_indicators = [
-        'snapshot', 'snap', 'pre', 'rc', 'alpha', 'beta',
-        'dev', 'experimental', 'test', 'snapshot'
+    version_lower = str(version_string).lower()
+
+    # Minecraft snapshot patterns
+    snapshot_patterns = [
+        r'\d+w\d+[a-z]',  # e.g., 25w21a, 24w03b
+        r'snapshot',  # Contains "snapshot"
+        r'pre\d*',  # pre-release (pre1, pre2, etc.)
+        r'rc\d*',  # release candidate
+        r'alpha',  # alpha
+        r'beta',  # beta
+        r'dev',  # development
+        r'experimental',  # experimental
+        r'test',  # test
     ]
 
-    version_lower = str(version_string).lower()
-    return any(indicator in version_lower for indicator in snapshot_indicators)
+    # Check if it matches any snapshot pattern
+    for pattern in snapshot_patterns:
+        if re.search(pattern, version_lower):
+            return True
+
+    return False
 
 
 def filter_minecraft_versions(versions: List[str], include_snapshots: bool = False) -> List[str]:

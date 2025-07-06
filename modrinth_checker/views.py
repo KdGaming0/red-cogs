@@ -38,47 +38,158 @@ class MinecraftVersionView(discord.ui.View):
         self.result = None
         self.selected_versions = []
         self.specific_mode = False
-        self.showing_snapshots = False
+        self.showing_snapshots = False  # Start with snapshots hidden
 
         # Start with release versions only
         self.current_versions = self.release_versions.copy()
 
-        # Update the embed with current state
-        self._update_embed()
+        # Build initial view
+        self._build_main_view()
 
-    def _update_embed(self):
-        """Update the embed to show current version list and snapshot status."""
-        if hasattr(self, '_message') and self._message:
-            embed = discord.Embed(
-                title="Minecraft Version Configuration",
-                description="Which Minecraft versions should be monitored?",
-                color=discord.Color.blue()
+    def _build_main_view(self):
+        """Build the main selection view."""
+        self.clear_items()
+
+        # Main buttons with descriptions
+        all_btn = discord.ui.Button(
+            label="All Versions",
+            style=discord.ButtonStyle.primary,
+            row=0
+        )
+        all_btn.callback = self.all_versions_btn
+        self.add_item(all_btn)
+
+        specific_btn = discord.ui.Button(
+            label="Specific Versions",
+            style=discord.ButtonStyle.secondary,
+            row=0
+        )
+        specific_btn.callback = self.specific_versions
+        self.add_item(specific_btn)
+
+        # Latest buttons
+        latest_current_btn = discord.ui.Button(
+            label="Latest (Current MC)",
+            style=discord.ButtonStyle.success,
+            row=1
+        )
+        latest_current_btn.callback = self.latest_current
+        self.add_item(latest_current_btn)
+
+        latest_always_btn = discord.ui.Button(
+            label="Latest (Always)",
+            style=discord.ButtonStyle.success,
+            row=1
+        )
+        latest_always_btn.callback = self.latest_always
+        self.add_item(latest_always_btn)
+
+        # Add snapshot toggle if available
+        if self.has_snapshots:
+            snapshot_btn = discord.ui.Button(
+                label="Show Snapshots" if not self.showing_snapshots else "Hide Snapshots",
+                style=discord.ButtonStyle.secondary,
+                row=2
             )
+            snapshot_btn.callback = self._toggle_snapshots_main
+            self.add_item(snapshot_btn)
 
-            # Show current version list
-            version_display = format_version_list(self.current_versions, max_display=20)
+    def _build_specific_view(self):
+        """Build the specific version selection view."""
+        self.clear_items()
+
+        # Add version selector with current versions (respecting snapshot setting)
+        version_select = VersionSelect(self.current_versions, self)
+        self.add_item(version_select)
+
+        # Add snapshot toggle if available
+        if self.has_snapshots:
+            snapshot_btn = discord.ui.Button(
+                label="Show Snapshots" if not self.showing_snapshots else "Hide Snapshots",
+                style=discord.ButtonStyle.secondary,
+                row=1
+            )
+            snapshot_btn.callback = self._toggle_snapshots_specific
+            self.add_item(snapshot_btn)
+
+        # Add continue button
+        continue_btn = discord.ui.Button(
+            label="Continue",
+            style=discord.ButtonStyle.green,
+            row=2,
+            disabled=len(self.selected_versions) == 0
+        )
+        continue_btn.callback = self._continue_specific
+        self.add_item(continue_btn)
+
+        # Add back button
+        back_btn = discord.ui.Button(
+            label="Back",
+            style=discord.ButtonStyle.secondary,
+            row=2
+        )
+        back_btn.callback = self._back_to_main
+        self.add_item(back_btn)
+
+    def _create_main_embed(self):
+        """Create the main selection embed."""
+        embed = discord.Embed(
+            title="Step 1: Minecraft Version Configuration",
+            description="Which Minecraft versions should be monitored?",
+            color=discord.Color.blue()
+        )
+
+        # Show current version list
+        version_display = format_version_list(self.current_versions, max_display=15)
+        embed.add_field(
+            name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
+            value=version_display,
+            inline=False
+        )
+
+        # Add button descriptions
+        embed.add_field(
+            name="📋 Options:",
+            value=(
+                "**All Versions** - Monitor all available versions\n"
+                "**Specific Versions** - Choose which versions to monitor\n"
+                "**Latest (Current MC)** - Monitor only the latest version for current Minecraft\n"
+                "**Latest (Always)** - Always monitor the newest version automatically\n"
+                f"**{'Show' if not self.showing_snapshots else 'Hide'} Snapshots** - Toggle snapshot visibility"
+            ),
+            inline=False
+        )
+
+        return embed
+
+    def _create_specific_embed(self):
+        """Create the specific version selection embed."""
+        embed = discord.Embed(
+            title="Select Specific Versions",
+            description="Choose which versions to monitor from the dropdown below:",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
+            value=format_version_list(self.current_versions, max_display=15),
+            inline=False
+        )
+
+        if self.selected_versions:
             embed.add_field(
-                name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
-                value=version_display,
+                name="✅ Selected Versions",
+                value=format_version_list(self.selected_versions),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="⚠️ Selected Versions",
+                value="None selected yet",
                 inline=False
             )
 
-            if self.specific_mode and self.selected_versions:
-                embed.add_field(
-                    name="Selected Versions",
-                    value=format_version_list(self.selected_versions),
-                    inline=False
-                )
-
-            # Update the message
-            try:
-                self._message.edit(embed=embed, view=self)
-            except:
-                pass  # Message might be deleted or we might not have permission
-
-    def _is_snapshot(self, version: str) -> bool:
-        """Check if a version is a snapshot."""
-        return is_snapshot(version)
+        return embed
 
     @discord.ui.button(label="All Versions", style=discord.ButtonStyle.primary, row=0)
     async def all_versions_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -103,139 +214,46 @@ class MinecraftVersionView(discord.ui.View):
         self.specific_mode = True
         self.selected_versions = []
 
-        # Create new embed for specific version selection
-        embed = discord.Embed(
-            title="Select Specific Versions",
-            description="Select which versions to monitor:",
-            color=discord.Color.blue()
-        )
-
-        embed.add_field(
-            name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
-            value=format_version_list(self.current_versions, max_display=20),
-            inline=False
-        )
-
-        if self.selected_versions:
-            embed.add_field(
-                name="Selected Versions",
-                value=format_version_list(self.selected_versions),
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="Selected Versions",
-                value="None selected",
-                inline=False
-            )
-
-        # Update view for specific selection
-        self.clear_items()
-
-        # Add version selector
-        version_select = VersionSelect(self.current_versions, self)
-        self.add_item(version_select)
-
-        # Add snapshot toggle if available
-        if self.has_snapshots:
-            snapshot_btn = discord.ui.Button(
-                label="Show Snapshots" if not self.showing_snapshots else "Hide Snapshots",
-                style=discord.ButtonStyle.secondary,
-                row=1
-            )
-            snapshot_btn.callback = self._toggle_snapshots
-            self.add_item(snapshot_btn)
-
-        # Add continue button
-        continue_btn = discord.ui.Button(
-            label="Continue",
-            style=discord.ButtonStyle.green,
-            row=2,
-            disabled=len(self.selected_versions) == 0
-        )
-        continue_btn.callback = self._continue_specific
-        self.add_item(continue_btn)
-
-        # Add back button
-        back_btn = discord.ui.Button(
-            label="Back",
-            style=discord.ButtonStyle.secondary,
-            row=2
-        )
-        back_btn.callback = self._back_to_main
-        self.add_item(back_btn)
+        # Build specific selection view
+        self._build_specific_view()
+        embed = self._create_specific_embed()
 
         await interaction.response.edit_message(embed=embed, view=self)
 
-    async def _toggle_snapshots(self, interaction: discord.Interaction):
-        """Toggle snapshot visibility."""
+    async def _toggle_snapshots_main(self, interaction: discord.Interaction):
+        """Toggle snapshots in main menu."""
         self.showing_snapshots = not self.showing_snapshots
 
+        # Update current versions based on snapshot setting
         if self.showing_snapshots:
             self.current_versions = self.available_versions.copy()
         else:
             self.current_versions = self.release_versions.copy()
 
-        # Update embed
-        embed = discord.Embed(
-            title="Select Specific Versions",
-            description="Select which versions to monitor:",
-            color=discord.Color.blue()
-        )
+        # Rebuild main view with updated button
+        self._build_main_view()
+        embed = self._create_main_embed()
 
-        embed.add_field(
-            name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
-            value=format_version_list(self.current_versions, max_display=20),
-            inline=False
-        )
+        await interaction.response.edit_message(embed=embed, view=self)
 
-        if self.selected_versions:
-            embed.add_field(
-                name="Selected Versions",
-                value=format_version_list(self.selected_versions),
-                inline=False
-            )
+    async def _toggle_snapshots_specific(self, interaction: discord.Interaction):
+        """Toggle snapshots in specific selection mode."""
+        self.showing_snapshots = not self.showing_snapshots
+
+        # Update current versions based on snapshot setting
+        if self.showing_snapshots:
+            self.current_versions = self.available_versions.copy()
         else:
-            embed.add_field(
-                name="Selected Versions",
-                value="None selected",
-                inline=False
-            )
+            self.current_versions = self.release_versions.copy()
 
-        # Update view
-        self.clear_items()
+        # Clear selected versions that are no longer available
+        if not self.showing_snapshots:
+            # Remove any snapshots from selected versions
+            self.selected_versions = [v for v in self.selected_versions if not is_snapshot(v)]
 
-        # Add version selector with updated versions
-        version_select = VersionSelect(self.current_versions, self)
-        self.add_item(version_select)
-
-        # Add snapshot toggle
-        snapshot_btn = discord.ui.Button(
-            label="Show Snapshots" if not self.showing_snapshots else "Hide Snapshots",
-            style=discord.ButtonStyle.secondary,
-            row=1
-        )
-        snapshot_btn.callback = self._toggle_snapshots
-        self.add_item(snapshot_btn)
-
-        # Add continue button
-        continue_btn = discord.ui.Button(
-            label="Continue",
-            style=discord.ButtonStyle.green,
-            row=2,
-            disabled=len(self.selected_versions) == 0
-        )
-        continue_btn.callback = self._continue_specific
-        self.add_item(continue_btn)
-
-        # Add back button
-        back_btn = discord.ui.Button(
-            label="Back",
-            style=discord.ButtonStyle.secondary,
-            row=2
-        )
-        back_btn.callback = self._back_to_main
-        self.add_item(back_btn)
+        # Rebuild specific view
+        self._build_specific_view()
+        embed = self._create_specific_embed()
 
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -268,88 +286,18 @@ class MinecraftVersionView(discord.ui.View):
     async def _back_to_main(self, interaction: discord.Interaction):
         """Go back to main menu."""
         self.specific_mode = False
-        self.selected_versions = []
+        # Don't clear selected versions in case user wants to go back to specific selection
 
-        # Reset to main menu
-        embed = discord.Embed(
-            title="Minecraft Version Configuration",
-            description="Which Minecraft versions should be monitored?",
-            color=discord.Color.blue()
-        )
-
-        embed.add_field(
-            name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
-            value=format_version_list(self.current_versions, max_display=20),
-            inline=False
-        )
-
-        # Reset view to main menu
-        self.clear_items()
-
-        # Main buttons
-        all_btn = discord.ui.Button(label="All Versions", style=discord.ButtonStyle.primary, row=0)
-        all_btn.callback = self.all_versions_btn
-        self.add_item(all_btn)
-
-        specific_btn = discord.ui.Button(label="Specific Versions", style=discord.ButtonStyle.secondary, row=0)
-        specific_btn.callback = self.specific_versions
-        self.add_item(specific_btn)
-
-        # Latest buttons
-        latest_current_btn = discord.ui.Button(label="Latest (Current MC)", style=discord.ButtonStyle.success, row=1)
-        latest_current_btn.callback = self.latest_current
-        self.add_item(latest_current_btn)
-
-        latest_always_btn = discord.ui.Button(label="Latest (Always)", style=discord.ButtonStyle.success, row=1)
-        latest_always_btn.callback = self.latest_always
-        self.add_item(latest_always_btn)
-
-        # Add snapshot toggle if available
-        if self.has_snapshots:
-            snapshot_btn = discord.ui.Button(
-                label="Show Snapshots" if not self.showing_snapshots else "Hide Snapshots",
-                style=discord.ButtonStyle.secondary,
-                row=2
-            )
-            snapshot_btn.callback = self._toggle_snapshots_main
-            self.add_item(snapshot_btn)
-
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def _toggle_snapshots_main(self, interaction: discord.Interaction):
-        """Toggle snapshots in main menu."""
-        self.showing_snapshots = not self.showing_snapshots
-
-        if self.showing_snapshots:
-            self.current_versions = self.available_versions.copy()
-        else:
-            self.current_versions = self.release_versions.copy()
-
-        # Update embed
-        embed = discord.Embed(
-            title="Minecraft Version Configuration",
-            description="Which Minecraft versions should be monitored?",
-            color=discord.Color.blue()
-        )
-
-        embed.add_field(
-            name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
-            value=format_version_list(self.current_versions, max_display=20),
-            inline=False
-        )
-
-        # Update the snapshot button label
-        for item in self.children:
-            if isinstance(item, discord.ui.Button) and (
-                    "Show Snapshots" in item.label or "Hide Snapshots" in item.label):
-                item.label = "Show Snapshots" if not self.showing_snapshots else "Hide Snapshots"
+        # Rebuild main view
+        self._build_main_view()
+        embed = self._create_main_embed()
 
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Latest (Current MC)", style=discord.ButtonStyle.success, row=1)
     async def latest_current(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Monitor only the latest version for current MC."""
-        # Get the latest version
+        # Get the latest version from current display
         latest_version = self.current_versions[0] if self.current_versions else None
 
         if not latest_version:
@@ -380,7 +328,7 @@ class MinecraftVersionView(discord.ui.View):
 
         embed = discord.Embed(
             title="✅ Configuration Complete",
-            description="Monitoring **latest version always** (automatically updates)",
+            description="Monitoring **latest version always** (automatically updates to newest version)",
             color=discord.Color.green()
         )
 
@@ -405,7 +353,7 @@ class VersionSelect(discord.ui.Select):
             options.append(discord.SelectOption(
                 label=version,
                 value=version,
-                description=f"{'Snapshot' if is_snapshot(version) else 'Release'}",
+                description=f"{'Snapshot' if is_snapshot(version) else 'Release'} version",
                 default=is_selected
             ))
 
@@ -421,30 +369,7 @@ class VersionSelect(discord.ui.Select):
         self.parent_view.selected_versions = self.values.copy()
 
         # Update embed
-        embed = discord.Embed(
-            title="Select Specific Versions",
-            description="Select which versions to monitor:",
-            color=discord.Color.blue()
-        )
-
-        embed.add_field(
-            name=f"Available Versions {'(Including Snapshots)' if self.parent_view.showing_snapshots else '(Release Only)'}",
-            value=format_version_list(self.parent_view.current_versions, max_display=20),
-            inline=False
-        )
-
-        if self.parent_view.selected_versions:
-            embed.add_field(
-                name="Selected Versions",
-                value=format_version_list(self.parent_view.selected_versions),
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="Selected Versions",
-                value="None selected",
-                inline=False
-            )
+        embed = self.parent_view._create_specific_embed()
 
         # Update continue button state
         for item in self.parent_view.children:
@@ -462,11 +387,11 @@ class LoaderView(discord.ui.View):
         self.selected_loaders = []
 
         # Create buttons for each loader
-        for loader in available_loaders:
+        for i, loader in enumerate(available_loaders):
             button = discord.ui.Button(
                 label=loader.title(),
                 style=discord.ButtonStyle.secondary,
-                custom_id=f"loader_{loader}"
+                row=i // 5  # 5 buttons per row
             )
             button.callback = self._create_loader_callback(loader)
             self.add_item(button)
@@ -475,7 +400,7 @@ class LoaderView(discord.ui.View):
         all_btn = discord.ui.Button(
             label="All Loaders",
             style=discord.ButtonStyle.primary,
-            custom_id="all_loaders"
+            row=(len(available_loaders) // 5) + 1
         )
         all_btn.callback = self._all_loaders_callback
         self.add_item(all_btn)
@@ -484,7 +409,7 @@ class LoaderView(discord.ui.View):
         custom_btn = discord.ui.Button(
             label="Custom Selection",
             style=discord.ButtonStyle.secondary,
-            custom_id="custom_selection"
+            row=(len(available_loaders) // 5) + 1
         )
         custom_btn.callback = self._custom_selection_callback
         self.add_item(custom_btn)
@@ -533,7 +458,7 @@ class LoaderView(discord.ui.View):
             color=discord.Color.blue()
         )
 
-        view = discord.ui.View()
+        view = discord.ui.View(timeout=300)
 
         # Add loader selector
         loader_select = LoaderSelect(self.available_loaders, self)
@@ -618,8 +543,7 @@ class ReleaseChannelView(discord.ui.View):
         for channel in channels:
             button = discord.ui.Button(
                 label=channel.title(),
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"channel_{channel}"
+                style=discord.ButtonStyle.secondary
             )
             button.callback = self._create_channel_callback(channel)
             self.add_item(button)
@@ -627,8 +551,7 @@ class ReleaseChannelView(discord.ui.View):
         # Add "All Channels" button
         all_btn = discord.ui.Button(
             label="All Channels",
-            style=discord.ButtonStyle.primary,
-            custom_id="all_channels"
+            style=discord.ButtonStyle.primary
         )
         all_btn.callback = self._all_channels_callback
         self.add_item(all_btn)
@@ -636,8 +559,7 @@ class ReleaseChannelView(discord.ui.View):
         # Add custom selection button
         custom_btn = discord.ui.Button(
             label="Custom Selection",
-            style=discord.ButtonStyle.secondary,
-            custom_id="custom_selection"
+            style=discord.ButtonStyle.secondary
         )
         custom_btn.callback = self._custom_selection_callback
         self.add_item(custom_btn)
@@ -686,7 +608,7 @@ class ReleaseChannelView(discord.ui.View):
             color=discord.Color.blue()
         )
 
-        view = discord.ui.View()
+        view = discord.ui.View(timeout=300)
 
         # Add channel selector
         channel_select = ReleaseChannelSelect(self)
