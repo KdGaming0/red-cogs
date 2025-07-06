@@ -1,0 +1,22 @@
+{
+    "author": [
+        "Kd_Gaming1"
+    ],
+    "install_msg": "Thank you for installing the ModrinthWatcher cog! Use the `/mwatch` command group to get started. You can add a project for tracking with `/mwatch track`.",
+    "name": "ModrinthWatcher",
+    "short": "Monitors Modrinth projects for new updates.",
+    "description": "A cog to track projects on Modrinth and receive notifications in your server when a new version is released. Features include role mentions, customizable settings, and detailed update embeds.",
+    "tags": [
+        "modrinth",
+        "minecraft",
+        "mods",
+        "updates",
+        "tracking",
+        "notifications"
+    ],
+    "requirements": [
+        "httpx"
+    ],
+    "end_user_data_statement": "This cog stores data about Modrinth projects you choose to track. This includes project IDs, names, and version information from Modrinth. It also stores server-specific settings such as the guild ID, notification channel ID, and IDs of roles to be mentioned. This data is necessary for the cog to function and is only used for providing update notifications. User data is not stored.",
+    "min_bot_version": "3.5.0"
+}
