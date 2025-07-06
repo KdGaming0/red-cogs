@@ -44,6 +44,29 @@ class ModrinthChecker(commands.Cog):
         if hasattr(self, 'bg_task'):
             self.bg_task.cancel()
 
+    def _is_snapshot(self, version: str) -> bool:
+        """Check if a Minecraft version is a snapshot."""
+        # Snapshot patterns: 25w21a, 1.21-pre1, 1.21-rc1, etc.
+        snapshot_patterns = [
+            r'^\d+w\d+[a-z]$',  # Weekly snapshots like 25w21a
+            r'.*-pre\d+$',  # Pre-releases like 1.21-pre1
+            r'.*-rc\d+$',  # Release candidates like 1.21-rc1
+            r'.*snapshot.*',  # Any version with "snapshot"
+        ]
+
+        for pattern in patterns:
+            if re.match(pattern, version, re.IGNORECASE):
+                return True
+        return False
+
+    def _filter_minecraft_versions(self, versions: List[str], include_snapshots: bool = False) -> List[str]:
+        """Filter Minecraft versions to show only releases or include snapshots."""
+        if include_snapshots:
+            return versions
+
+        # Filter out snapshots
+        return [v for v in versions if not self._is_snapshot(v)]
+
     async def _api_request(self, endpoint: str, params: dict = None) -> Optional[dict]:
         """Make an API request to Modrinth."""
         url = f"{self.api_base}{endpoint}"
@@ -227,7 +250,12 @@ class ModrinthChecker(commands.Cog):
         await view.wait()
 
         if not view.value:
-            await message.edit(content="❌ Project addition cancelled.", embed=None, view=None)
+            embed = discord.Embed(
+                title="❌ Setup Cancelled",
+                description="Project addition has been cancelled.",
+                color=0xff0000
+            )
+            await message.edit(embed=embed, view=None)
             return
 
         # Start setup process
@@ -241,7 +269,12 @@ class ModrinthChecker(commands.Cog):
             # Get project versions to determine available options
             versions = await self._get_project_versions(project_id)
             if not versions:
-                await message.edit(content="❌ Could not retrieve project versions.", embed=None, view=None)
+                embed = discord.Embed(
+                    title="❌ Setup Failed",
+                    description="Could not retrieve project versions.",
+                    color=0xff0000
+                )
+                await message.edit(embed=embed, view=None)
                 return
 
             # Extract available minecraft versions and loaders
@@ -299,33 +332,72 @@ class ModrinthChecker(commands.Cog):
             # Send initial notification
             await self._send_initial_notification(ctx, project, project_config, versions)
 
-            await message.edit(
-                content=f"✅ Successfully added **{project['title']}** to monitoring!",
-                embed=None,
-                view=None
+            embed = discord.Embed(
+                title="✅ Setup Complete",
+                description=f"Successfully added **{project['title']}** to monitoring!",
+                color=0x00ff00
             )
+            await message.edit(embed=embed, view=None)
 
         except asyncio.TimeoutError:
-            await message.edit(content="❌ Setup timed out. Please try again.", embed=None, view=None)
+            embed = discord.Embed(
+                title="⏰ Setup Timed Out",
+                description="Setup process timed out. Please try again.",
+                color=0xff0000
+            )
+            await message.edit(embed=embed, view=None)
         except Exception as e:
             log.error(f"Error setting up project monitoring: {e}")
-            await message.edit(content="❌ An error occurred during setup.", embed=None, view=None)
+            embed = discord.Embed(
+                title="❌ Setup Error",
+                description="An error occurred during setup. Please try again.",
+                color=0xff0000
+            )
+            await message.edit(embed=embed, view=None)
 
     async def _setup_minecraft_versions(self, ctx, message, available_versions):
         """Setup minecraft version monitoring."""
+        # Filter versions to show releases by default
+        release_versions = self._filter_minecraft_versions(available_versions, include_snapshots=False)
+        has_snapshots = len(release_versions) < len(available_versions)
+
         embed = discord.Embed(
             title="Minecraft Version Configuration",
             description="Which Minecraft versions should be monitored?",
             color=0x1bd96a
         )
 
+        # Add explanation
         embed.add_field(
-            name="Available Versions",
-            value=", ".join(available_versions[:10]) + ("..." if len(available_versions) > 10 else ""),
+            name="Options Explained:",
+            value=(
+                "🟢 **All supported versions** - Monitor all current and future versions\n"
+                "🔹 **Specific versions** - Select individual versions to monitor\n"
+                "📋 **Latest current version** - Monitor only the current latest version\n"
+                "🔄 **Latest version always** - Auto-update to newest supported version"
+            ),
             inline=False
         )
 
-        view = MinecraftVersionView(available_versions)
+        # Show available versions (releases only by default)
+        version_display = ", ".join(release_versions[:15])
+        if len(release_versions) > 15:
+            version_display += f" (+{len(release_versions) - 15} more)"
+
+        embed.add_field(
+            name="Available Versions (Releases)",
+            value=version_display,
+            inline=False
+        )
+
+        if has_snapshots:
+            embed.add_field(
+                name="Note",
+                value="📸 Click 'Show Snapshots' to see experimental versions",
+                inline=False
+            )
+
+        view = MinecraftVersionView(available_versions, release_versions, has_snapshots)
         await message.edit(embed=embed, view=view)
         await view.wait()
 
@@ -337,6 +409,16 @@ class ModrinthChecker(commands.Cog):
             title="Loader Configuration",
             description="Which mod loaders should be monitored?",
             color=0x1bd96a
+        )
+
+        embed.add_field(
+            name="Options Explained:",
+            value=(
+                "🟢 **All supported loaders** - Monitor all loaders this project supports\n"
+                "🔹 **Individual loaders** - Select specific loaders to monitor\n"
+                "Click individual loader buttons to select/deselect them, then click Continue."
+            ),
+            inline=False
         )
 
         embed.add_field(
@@ -359,6 +441,18 @@ class ModrinthChecker(commands.Cog):
             color=0x1bd96a
         )
 
+        embed.add_field(
+            name="Options Explained:",
+            value=(
+                "🟢 **All Channels** - Monitor all release types\n"
+                "🔴 **Release** - Stable releases only\n"
+                "🟡 **Beta** - Beta/testing versions\n"
+                "🟠 **Alpha** - Early development versions\n"
+                "Click individual channel buttons to select/deselect them, then click Continue."
+            ),
+            inline=False
+        )
+
         view = ReleaseChannelView()
         await message.edit(embed=embed, view=view)
         await view.wait()
@@ -371,6 +465,12 @@ class ModrinthChecker(commands.Cog):
             title="Discord Channel Configuration",
             description="Please mention the channel where notifications should be sent.",
             color=0x1bd96a
+        )
+
+        embed.add_field(
+            name="How to specify:",
+            value="• Mention a channel: #updates\n• Use channel ID: 123456789012345678",
+            inline=False
         )
 
         await message.edit(embed=embed, view=None)
@@ -394,11 +494,21 @@ class ModrinthChecker(commands.Cog):
             except ValueError:
                 pass
 
-            await ctx.send("❌ Invalid channel. Please mention a valid channel or provide a channel ID.")
+            embed = discord.Embed(
+                title="❌ Invalid Channel",
+                description="Please mention a valid channel or provide a channel ID.",
+                color=0xff0000
+            )
+            await ctx.send(embed=embed)
             return None
 
         except asyncio.TimeoutError:
-            await ctx.send("❌ Timed out waiting for channel.")
+            embed = discord.Embed(
+                title="⏰ Setup Timed Out",
+                description="Timed out waiting for channel input.",
+                color=0xff0000
+            )
+            await message.edit(embed=embed, view=None)
             return None
 
     async def _setup_roles(self, ctx, message):
@@ -407,6 +517,12 @@ class ModrinthChecker(commands.Cog):
             title="Role Configuration",
             description="Please mention the roles to ping for notifications, or type 'none' for no pings.",
             color=0x1bd96a
+        )
+
+        embed.add_field(
+            name="How to specify:",
+            value="• Mention roles: @testers @mods\n• Type 'none' for no role pings",
+            inline=False
         )
 
         await message.edit(embed=embed, view=None)
@@ -423,7 +539,12 @@ class ModrinthChecker(commands.Cog):
             return response.role_mentions
 
         except asyncio.TimeoutError:
-            await ctx.send("❌ Timed out waiting for roles.")
+            embed = discord.Embed(
+                title="⏰ Setup Timed Out",
+                description="Timed out waiting for role input.",
+                color=0xff0000
+            )
+            await message.edit(embed=embed, view=None)
             return None
 
     async def _send_initial_notification(self, ctx, project, config, versions):
@@ -581,13 +702,19 @@ class ModrinthChecker(commands.Cog):
             async with self.config.guild(ctx.guild).projects() as projects:
                 del projects[project_id]
 
-            await message.edit(
-                content=f"✅ Removed **{project_name}** from monitoring.",
-                embed=None,
-                view=None
+            embed = discord.Embed(
+                title="✅ Project Removed",
+                description=f"Removed **{project_name}** from monitoring.",
+                color=0x00ff00
             )
+            await message.edit(embed=embed, view=None)
         else:
-            await message.edit(content="❌ Removal cancelled.", embed=None, view=None)
+            embed = discord.Embed(
+                title="❌ Removal Cancelled",
+                description="Project removal has been cancelled.",
+                color=0xff0000
+            )
+            await message.edit(embed=embed, view=None)
 
     @modrinth.command(name="check")
     async def manual_check(self, ctx, *, project_identifier: str):
@@ -856,38 +983,177 @@ class ConfirmView(discord.ui.View):
         self.stop()
         await interaction.response.defer()
 
+    async def on_timeout(self):
+        # Disable all buttons when timeout occurs
+        for item in self.children:
+            item.disabled = True
+
 
 class MinecraftVersionView(discord.ui.View):
-    def __init__(self, available_versions):
+    def __init__(self, all_versions, release_versions, has_snapshots):
         super().__init__(timeout=120)
-        self.available_versions = available_versions
+        self.all_versions = all_versions
+        self.release_versions = release_versions
+        self.has_snapshots = has_snapshots
         self.result = None
+        self.showing_snapshots = False
+        self.selected_versions = []
+        self.specific_mode = False
 
     @discord.ui.button(label="1️⃣ All supported versions", style=discord.ButtonStyle.primary)
-    async def all_versions(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.result = self.available_versions
+    async def all_versions_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.result = self.all_versions
         self.stop()
         await interaction.response.defer()
 
     @discord.ui.button(label="2️⃣ Specific versions", style=discord.ButtonStyle.secondary)
     async def specific_versions(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # For now, just select the latest version
-        # In a full implementation, you'd want a dropdown or modal
-        self.result = [self.available_versions[0]] if self.available_versions else []
+        self.specific_mode = True
+
+        # Create dropdown for version selection
+        embed = discord.Embed(
+            title="Select Specific Minecraft Versions",
+            description="Select up to 25 versions to monitor:",
+            color=0x1bd96a
+        )
+
+        view = VersionSelectView(self.release_versions if not self.showing_snapshots else self.all_versions,
+                                 self.has_snapshots)
+        await interaction.response.edit_message(embed=embed, view=view)
+        await view.wait()
+
+        self.result = view.selected_versions
         self.stop()
-        await interaction.response.defer()
 
     @discord.ui.button(label="3️⃣ Latest current version", style=discord.ButtonStyle.secondary)
     async def latest_current(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.result = [self.available_versions[0]] if self.available_versions else []
+        versions_to_use = self.release_versions if not self.showing_snapshots else self.all_versions
+        self.result = [versions_to_use[0]] if versions_to_use else []
         self.stop()
         await interaction.response.defer()
 
     @discord.ui.button(label="4️⃣ Latest version always", style=discord.ButtonStyle.secondary)
     async def latest_always(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.result = "latest_always"  # Special flag
+        self.result = "latest_always"
         self.stop()
         await interaction.response.defer()
+
+    @discord.ui.button(label="📸 Show Snapshots", style=discord.ButtonStyle.gray, row=1)
+    async def toggle_snapshots(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.has_snapshots:
+            await interaction.response.defer()
+            return
+
+        self.showing_snapshots = not self.showing_snapshots
+
+        # Update embed
+        embed = discord.Embed(
+            title="Minecraft Version Configuration",
+            description="Which Minecraft versions should be monitored?",
+            color=0x1bd96a
+        )
+
+        embed.add_field(
+            name="Options Explained:",
+            value=(
+                "🟢 **All supported versions** - Monitor all current and future versions\n"
+                "🔹 **Specific versions** - Select individual versions to monitor\n"
+                "📋 **Latest current version** - Monitor only the current latest version\n"
+                "🔄 **Latest version always** - Auto-update to newest supported version"
+            ),
+            inline=False
+        )
+
+        # Show appropriate versions
+        versions_to_show = self.all_versions if self.showing_snapshots else self.release_versions
+        version_display = ", ".join(versions_to_show[:15])
+        if len(versions_to_show) > 15:
+            version_display += f" (+{len(versions_to_show) - 15} more)"
+
+        version_type = "All Versions" if self.showing_snapshots else "Releases"
+        embed.add_field(
+            name=f"Available Versions ({version_type})",
+            value=version_display,
+            inline=False
+        )
+
+        # Update button label
+        button.label = "📋 Show Releases" if self.showing_snapshots else "📸 Show Snapshots"
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class VersionSelectView(discord.ui.View):
+    def __init__(self, versions, has_snapshots):
+        super().__init__(timeout=120)
+        self.versions = versions
+        self.has_snapshots = has_snapshots
+        self.selected_versions = []
+        self.showing_snapshots = False
+
+        # Add version dropdown
+        if len(versions) > 0:
+            self.add_item(VersionSelect(versions[:25]))  # Discord limit of 25 options
+
+        # Add continue button
+        continue_btn = discord.ui.Button(label="Continue", style=discord.ButtonStyle.green, row=2)
+        continue_btn.callback = self.continue_callback
+        self.add_item(continue_btn)
+
+        # Add snapshot toggle if needed
+        if has_snapshots:
+            snapshot_btn = discord.ui.Button(label="📸 Toggle Snapshots", style=discord.ButtonStyle.gray, row=2)
+            snapshot_btn.callback = self.toggle_snapshots
+            self.add_item(snapshot_btn)
+
+    async def continue_callback(self, interaction: discord.Interaction):
+        if not self.selected_versions:
+            await interaction.response.send_message("❌ Please select at least one version.", ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.defer()
+
+    async def toggle_snapshots(self, interaction: discord.Interaction):
+        # This would need to be implemented to switch between release and snapshot versions
+        await interaction.response.send_message("Snapshot toggle not yet implemented.", ephemeral=True)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class VersionSelect(discord.ui.Select):
+    def __init__(self, versions):
+        options = [
+            discord.SelectOption(
+                label=version,
+                value=version,
+                description=f"Minecraft {version}"
+            )
+            for version in versions
+        ]
+
+        super().__init__(
+            placeholder="Select Minecraft versions...",
+            min_values=1,
+            max_values=min(len(options), 25),
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_versions = self.values
+
+        embed = discord.Embed(
+            title="Selected Versions",
+            description=f"Selected: {', '.join(self.values)}",
+            color=0x1bd96a
+        )
+
+        await interaction.response.edit_message(embed=embed, view=self.view)
 
 
 class LoaderView(discord.ui.View):
@@ -895,12 +1161,92 @@ class LoaderView(discord.ui.View):
         super().__init__(timeout=120)
         self.available_loaders = available_loaders
         self.result = None
+        self.selected_loaders = []
 
-    @discord.ui.button(label="All supported loaders", style=discord.ButtonStyle.primary)
-    async def all_loaders(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Add "All supported loaders" button
+        all_btn = discord.ui.Button(label="All supported loaders", style=discord.ButtonStyle.primary)
+        all_btn.callback = self.all_loaders_callback
+        self.add_item(all_btn)
+
+        # Add individual loader buttons
+        for loader in available_loaders:
+            btn = discord.ui.Button(label=loader.title(), style=discord.ButtonStyle.secondary)
+            btn.callback = self.create_loader_callback(loader)
+            self.add_item(btn)
+
+        # Add continue button
+        continue_btn = discord.ui.Button(label="Continue", style=discord.ButtonStyle.green, row=2)
+        continue_btn.callback = self.continue_callback
+        self.add_item(continue_btn)
+
+    async def all_loaders_callback(self, interaction: discord.Interaction):
         self.result = self.available_loaders
         self.stop()
         await interaction.response.defer()
+
+    def create_loader_callback(self, loader):
+        async def loader_callback(interaction: discord.Interaction):
+            if loader in self.selected_loaders:
+                self.selected_loaders.remove(loader)
+                # Change button style back to secondary
+                for item in self.children:
+                    if hasattr(item, 'label') and item.label == loader.title():
+                        item.style = discord.ButtonStyle.secondary
+                        break
+            else:
+                self.selected_loaders.append(loader)
+                # Change button style to success
+                for item in self.children:
+                    if hasattr(item, 'label') and item.label == loader.title():
+                        item.style = discord.ButtonStyle.success
+                        break
+
+            # Update embed to show selected loaders
+            embed = discord.Embed(
+                title="Loader Configuration",
+                description="Which mod loaders should be monitored?",
+                color=0x1bd96a
+            )
+
+            embed.add_field(
+                name="Options Explained:",
+                value=(
+                    "🟢 **All supported loaders** - Monitor all loaders this project supports\n"
+                    "🔹 **Individual loaders** - Select specific loaders to monitor\n"
+                    "Click individual loader buttons to select/deselect them, then click Continue."
+                ),
+                inline=False
+            )
+
+            embed.add_field(
+                name="Available Loaders",
+                value=", ".join(self.available_loaders),
+                inline=False
+            )
+
+            if self.selected_loaders:
+                embed.add_field(
+                    name="Selected Loaders",
+                    value=", ".join(self.selected_loaders),
+                    inline=False
+                )
+
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        return loader_callback
+
+    async def continue_callback(self, interaction: discord.Interaction):
+        if not self.selected_loaders:
+            await interaction.response.send_message("❌ Please select at least one loader.", ephemeral=True)
+            return
+
+        self.result = self.selected_loaders
+        self.stop()
+        await interaction.response.defer()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
 
 class ReleaseChannelView(discord.ui.View):
@@ -909,48 +1255,84 @@ class ReleaseChannelView(discord.ui.View):
         self.result = None
         self.selected_channels = []
 
-    @discord.ui.button(label="All Channels", style=discord.ButtonStyle.primary)
-    async def all_channels(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Add "All Channels" button
+        all_btn = discord.ui.Button(label="All Channels", style=discord.ButtonStyle.primary)
+        all_btn.callback = self.all_channels_callback
+        self.add_item(all_btn)
+
+        # Add individual channel buttons
+        channels = [("Release", "release"), ("Beta", "beta"), ("Alpha", "alpha")]
+        for display_name, channel_type in channels:
+            btn = discord.ui.Button(label=display_name, style=discord.ButtonStyle.secondary)
+            btn.callback = self.create_channel_callback(channel_type, display_name)
+            self.add_item(btn)
+
+        # Add continue button
+        continue_btn = discord.ui.Button(label="Continue", style=discord.ButtonStyle.green, row=1)
+        continue_btn.callback = self.continue_callback
+        self.add_item(continue_btn)
+
+    async def all_channels_callback(self, interaction: discord.Interaction):
         self.result = ['release', 'beta', 'alpha']
         self.stop()
         await interaction.response.defer()
 
-    @discord.ui.button(label="Release", style=discord.ButtonStyle.secondary)
-    async def release_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if 'release' in self.selected_channels:
-            self.selected_channels.remove('release')
-            button.style = discord.ButtonStyle.secondary
-        else:
-            self.selected_channels.append('release')
-            button.style = discord.ButtonStyle.success
+    def create_channel_callback(self, channel_type, display_name):
+        async def channel_callback(interaction: discord.Interaction):
+            if channel_type in self.selected_channels:
+                self.selected_channels.remove(channel_type)
+                # Change button style back to secondary
+                for item in self.children:
+                    if hasattr(item, 'label') and item.label == display_name:
+                        item.style = discord.ButtonStyle.secondary
+                        break
+            else:
+                self.selected_channels.append(channel_type)
+                # Change button style to success
+                for item in self.children:
+                    if hasattr(item, 'label') and item.label == display_name:
+                        item.style = discord.ButtonStyle.success
+                        break
 
-        await interaction.response.edit_message(view=self)
+            # Update embed to show selected channels
+            embed = discord.Embed(
+                title="Release Channel Configuration",
+                description="Which release channels should be monitored?",
+                color=0x1bd96a
+            )
 
-    @discord.ui.button(label="Beta", style=discord.ButtonStyle.secondary)
-    async def beta_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if 'beta' in self.selected_channels:
-            self.selected_channels.remove('beta')
-            button.style = discord.ButtonStyle.secondary
-        else:
-            self.selected_channels.append('beta')
-            button.style = discord.ButtonStyle.success
+            embed.add_field(
+                name="Options Explained:",
+                value=(
+                    "🟢 **All Channels** - Monitor all release types\n"
+                    "🔴 **Release** - Stable releases only\n"
+                    "🟡 **Beta** - Beta/testing versions\n"
+                    "🟠 **Alpha** - Early development versions\n"
+                    "Click individual channel buttons to select/deselect them, then click Continue."
+                ),
+                inline=False
+            )
 
-        await interaction.response.edit_message(view=self)
+            if self.selected_channels:
+                embed.add_field(
+                    name="Selected Channels",
+                    value=", ".join([c.title() for c in self.selected_channels]),
+                    inline=False
+                )
 
-    @discord.ui.button(label="Alpha", style=discord.ButtonStyle.secondary)
-    async def alpha_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if 'alpha' in self.selected_channels:
-            self.selected_channels.remove('alpha')
-            button.style = discord.ButtonStyle.secondary
-        else:
-            self.selected_channels.append('alpha')
-            button.style = discord.ButtonStyle.success
+            await interaction.response.edit_message(embed=embed, view=self)
 
-        await interaction.response.edit_message(view=self)
+        return channel_callback
 
-    @discord.ui.button(label="Continue", style=discord.ButtonStyle.green, row=1)
-    async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.selected_channels:
-            self.result = self.selected_channels
-            self.stop()
+    async def continue_callback(self, interaction: discord.Interaction):
+        if not self.selected_channels:
+            await interaction.response.send_message("❌ Please select at least one release channel.", ephemeral=True)
+            return
+
+        self.result = self.selected_channels
+        self.stop()
         await interaction.response.defer()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
