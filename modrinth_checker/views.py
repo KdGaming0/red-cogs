@@ -162,16 +162,33 @@ class MinecraftVersionView(discord.ui.View):
             inline=False
         )
 
-        if self.has_snapshots:
+        # Show available versions in the main view
+        if self.available_versions:
+            # Show release versions
+            release_list = [v['version_number'] for v in self.release_versions[:10]]  # Show first 10
+            release_text = ", ".join(release_list)
+            if len(self.release_versions) > 10:
+                release_text += f" (+{len(self.release_versions) - 10} more)"
+
+            version_info = f"**Releases ({len(self.release_versions)}):** {release_text}"
+
+            # Show snapshot info if available
+            if self.has_snapshots:
+                snapshot_count = len(self.available_versions) - len(self.release_versions)
+                if self.showing_snapshots:
+                    snapshot_versions = [v['version_number'] for v in self.available_versions if
+                                         v.get('snapshot', False)]
+                    snapshot_list = snapshot_versions[:5]  # Show first 5 snapshots
+                    snapshot_text = ", ".join(snapshot_list)
+                    if len(snapshot_versions) > 5:
+                        snapshot_text += f" (+{len(snapshot_versions) - 5} more)"
+                    version_info += f"\n**Snapshots ({snapshot_count}):** {snapshot_text}"
+                else:
+                    version_info += f"\n**Snapshots:** {snapshot_count} available (click 'Show snapshots' to view)"
+
             embed.add_field(
                 name="Available Versions",
-                value=f"**Releases:** {len(self.release_versions)}\n**Snapshots:** {len(self.available_versions) - len(self.release_versions)}",
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="Available Versions",
-                value=f"**Releases:** {len(self.release_versions)}",
+                value=version_info,
                 inline=False
             )
 
@@ -709,10 +726,24 @@ class ReleaseChannelSelect(discord.ui.Select):
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
-class ChannelSelect(discord.ui.Select):
-    def __init__(self, channels, callback_func):
-        self.callback_func = callback_func
+class ChannelSelectView(discord.ui.View):
+    """A view for selecting Discord channels."""
 
+    def __init__(self, channels, *, timeout=120):
+        super().__init__(timeout=timeout)
+        self.result = None
+
+        if channels:
+            channel_select = ChannelSelect(channels)
+            self.add_item(channel_select)
+
+    async def on_timeout(self):
+        self.result = None
+        self.stop()
+
+
+class ChannelSelect(discord.ui.Select):
+    def __init__(self, channels):
         options = []
         for channel in channels:
             options.append(discord.SelectOption(
@@ -729,13 +760,53 @@ class ChannelSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        await self.callback_func(interaction, self.values[0])
+        # Get the parent view and set the result
+        view = self.view
+        view.result = self.values[0]
+        await interaction.response.edit_message(
+            content=f"✅ Channel selected: <#{self.values[0]}>",
+            embed=None,
+            view=None
+        )
+        view.stop()
+
+
+class RoleSelectView(discord.ui.View):
+    """A view for selecting Discord roles."""
+
+    def __init__(self, roles, *, timeout=120):
+        super().__init__(timeout=timeout)
+        self.result = None
+
+        if roles:
+            role_select = RoleSelect(roles)
+            self.add_item(role_select)
+
+        # Skip button for no roles
+        skip_button = discord.ui.Button(
+            label="Skip (No roles)",
+            style=discord.ButtonStyle.secondary,
+            row=1
+        )
+        skip_button.callback = self._skip_callback
+        self.add_item(skip_button)
+
+    async def _skip_callback(self, interaction: discord.Interaction):
+        self.result = []
+        await interaction.response.edit_message(
+            content="✅ No roles selected for pinging.",
+            embed=None,
+            view=None
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        self.result = None
+        self.stop()
 
 
 class RoleSelect(discord.ui.Select):
-    def __init__(self, roles, callback_func):
-        self.callback_func = callback_func
-
+    def __init__(self, roles):
         options = []
         for role in roles:
             options.append(discord.SelectOption(
@@ -752,4 +823,19 @@ class RoleSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        await self.callback_func(interaction, self.values)
+        # Get the parent view and set the result
+        view = self.view
+        view.result = self.values
+
+        if self.values:
+            role_mentions = [f"<@&{role_id}>" for role_id in self.values]
+            content = f"✅ Selected roles: {', '.join(role_mentions)}"
+        else:
+            content = "✅ No roles selected for pinging."
+
+        await interaction.response.edit_message(
+            content=content,
+            embed=None,
+            view=None
+        )
+        view.stop()
