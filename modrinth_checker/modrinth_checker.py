@@ -54,7 +54,7 @@ class ModrinthChecker(commands.Cog):
             r'.*snapshot.*',  # Any version with "snapshot"
         ]
 
-        for pattern in patterns:
+        for pattern in snapshot_patterns:  # Fixed: was 'patterns', now 'snapshot_patterns'
             if re.match(pattern, version, re.IGNORECASE):
                 return True
         return False
