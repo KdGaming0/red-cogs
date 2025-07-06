@@ -1,503 +1,474 @@
 import discord
-from discord.ext import commands
-from typing import Dict, List, Optional, Any, Callable
-from .utils import is_snapshot, filter_minecraft_versions, format_version_list
+from redbot.core import commands
 import logging
 
 log = logging.getLogger("red.modrinth_checker")
 
 
 class ConfirmView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=60)
+    def __init__(self, *, timeout=120):
+        super().__init__(timeout=timeout)
         self.value = None
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
+    @discord.ui.button(label='Confirm', style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.value = True
-        await interaction.response.edit_message(content="✅ Confirmed!", view=None)
         self.stop()
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
+    @discord.ui.button(label='Cancel', style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.value = False
-        await interaction.response.edit_message(content="❌ Cancelled!", view=None)
         self.stop()
 
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
+        self.value = False
+        self.stop()
 
 
 class MinecraftVersionView(discord.ui.View):
-    def __init__(self, available_versions: List[str], has_snapshots: bool = False):
-        super().__init__(timeout=300)
+    def __init__(self, available_versions, *, timeout=120):
+        super().__init__(timeout=timeout)
         self.available_versions = available_versions
-        self.release_versions = filter_minecraft_versions(available_versions, include_snapshots=False)
-        self.has_snapshots = has_snapshots
+        self.release_versions = [v for v in available_versions if not v.get('snapshot', False)]
+        self.has_snapshots = any(v.get('snapshot', False) for v in available_versions)
         self.result = None
         self.selected_versions = []
         self.specific_mode = False
-        self.showing_snapshots = False  # Start with snapshots hidden
+        self.showing_snapshots = False
 
-        # Start with release versions only
-        self.current_versions = self.release_versions.copy()
+        # Get current versions (latest few releases)
+        self.current_versions = self.release_versions[:5] if self.release_versions else []
 
-        # Build initial view
         self._build_main_view()
 
     def _build_main_view(self):
-        """Build the main selection view."""
         self.clear_items()
 
-        # Main buttons
-        all_btn = discord.ui.Button(
-            label="All Versions",
+        # All versions button
+        all_button = discord.ui.Button(
+            label="All supported versions",
             style=discord.ButtonStyle.primary,
+            emoji="1️⃣",
             row=0
         )
-        all_btn.callback = self._all_versions_callback
-        self.add_item(all_btn)
+        all_button.callback = self._all_versions_callback
+        self.add_item(all_button)
 
-        specific_btn = discord.ui.Button(
-            label="Specific Versions",
-            style=discord.ButtonStyle.secondary,
+        # Specific versions button
+        specific_button = discord.ui.Button(
+            label="Specific versions",
+            style=discord.ButtonStyle.primary,
+            emoji="2️⃣",
             row=0
         )
-        specific_btn.callback = self._specific_versions_callback
-        self.add_item(specific_btn)
+        specific_button.callback = self._specific_versions_callback
+        self.add_item(specific_button)
 
-        # Latest buttons
-        latest_current_btn = discord.ui.Button(
-            label="Latest (Current MC)",
-            style=discord.ButtonStyle.success,
+        # Latest current button
+        latest_current_button = discord.ui.Button(
+            label="Latest current version",
+            style=discord.ButtonStyle.primary,
+            emoji="3️⃣",
             row=1
         )
-        latest_current_btn.callback = self._latest_current_callback
-        self.add_item(latest_current_btn)
+        latest_current_button.callback = self._latest_current_callback
+        self.add_item(latest_current_button)
 
-        latest_always_btn = discord.ui.Button(
-            label="Latest (Always)",
-            style=discord.ButtonStyle.success,
+        # Latest always button
+        latest_always_button = discord.ui.Button(
+            label="Latest version always",
+            style=discord.ButtonStyle.primary,
+            emoji="4️⃣",
             row=1
         )
-        latest_always_btn.callback = self._latest_always_callback
-        self.add_item(latest_always_btn)
+        latest_always_button.callback = self._latest_always_callback
+        self.add_item(latest_always_button)
 
-        # Add snapshot toggle if available
+        # Toggle snapshots button if available
         if self.has_snapshots:
-            snapshot_btn = discord.ui.Button(
-                label="Show Snapshots" if not self.showing_snapshots else "Hide Snapshots",
+            toggle_button = discord.ui.Button(
+                label="Show snapshots" if not self.showing_snapshots else "Hide snapshots",
                 style=discord.ButtonStyle.secondary,
                 row=2
             )
-            snapshot_btn.callback = self._toggle_snapshots_main
-            self.add_item(snapshot_btn)
+            toggle_button.callback = self._toggle_snapshots_main
+            self.add_item(toggle_button)
 
     def _build_specific_view(self):
-        """Build the specific version selection view."""
         self.clear_items()
 
-        # Add version selector with current versions (respecting snapshot setting)
-        version_select = VersionSelect(self.current_versions, self)
-        self.add_item(version_select)
+        # Version dropdown
+        versions_to_show = self.available_versions if self.showing_snapshots else self.release_versions
+        if versions_to_show:
+            version_select = VersionSelect(self, versions_to_show[:25])  # Discord limit
+            self.add_item(version_select)
 
-        # Add snapshot toggle if available
+        # Toggle snapshots button if available
         if self.has_snapshots:
-            snapshot_btn = discord.ui.Button(
-                label="Show Snapshots" if not self.showing_snapshots else "Hide Snapshots",
+            toggle_button = discord.ui.Button(
+                label="Show snapshots" if not self.showing_snapshots else "Hide snapshots",
                 style=discord.ButtonStyle.secondary,
                 row=1
             )
-            snapshot_btn.callback = self._toggle_snapshots_specific
-            self.add_item(snapshot_btn)
+            toggle_button.callback = self._toggle_snapshots_specific
+            self.add_item(toggle_button)
 
-        # Add continue button
-        continue_btn = discord.ui.Button(
-            label="Continue",
-            style=discord.ButtonStyle.green,
-            row=2,
-            disabled=len(self.selected_versions) == 0
-        )
-        continue_btn.callback = self._continue_specific
-        self.add_item(continue_btn)
+        # Continue button (only if versions selected)
+        if self.selected_versions:
+            continue_button = discord.ui.Button(
+                label="Continue",
+                style=discord.ButtonStyle.success,
+                row=2
+            )
+            continue_button.callback = self._continue_specific
+            self.add_item(continue_button)
 
-        # Add back button
-        back_btn = discord.ui.Button(
+        # Back button
+        back_button = discord.ui.Button(
             label="Back",
             style=discord.ButtonStyle.secondary,
             row=2
         )
-        back_btn.callback = self._back_to_main
-        self.add_item(back_btn)
+        back_button.callback = self._back_to_main
+        self.add_item(back_button)
 
     def _create_main_embed(self):
-        """Create the main selection embed."""
         embed = discord.Embed(
-            title="Step 1: Minecraft Version Configuration",
+            title="Select Minecraft Versions",
             description="Which Minecraft versions should be monitored?",
-            color=discord.Color.blue()
+            color=0x00ff00
         )
 
-        # Show current version list
-        version_display = format_version_list(self.current_versions, max_display=15)
         embed.add_field(
-            name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
-            value=version_display,
-            inline=False
-        )
-
-        # Add button descriptions
-        embed.add_field(
-            name="📋 Options:",
+            name="Options",
             value=(
-                "**All Versions** - Monitor all available versions\n"
-                "**Specific Versions** - Choose which versions to monitor\n"
-                "**Latest (Current MC)** - Monitor only the latest version for current Minecraft\n"
-                "**Latest (Always)** - Always monitor the newest version automatically\n"
-                f"**{'Show' if not self.showing_snapshots else 'Hide'} Snapshots** - Toggle snapshot visibility"
+                "1️⃣ **All supported versions** - Monitor all current and future versions\n"
+                "2️⃣ **Specific versions** - Choose specific versions to monitor\n"
+                "3️⃣ **Latest current version** - Monitor only the current latest version\n"
+                "4️⃣ **Latest version always** - Always monitor the newest version"
             ),
             inline=False
         )
 
+        if self.has_snapshots:
+            embed.add_field(
+                name="Available Versions",
+                value=f"**Releases:** {len(self.release_versions)}\n**Snapshots:** {len(self.available_versions) - len(self.release_versions)}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="Available Versions",
+                value=f"**Releases:** {len(self.release_versions)}",
+                inline=False
+            )
+
         return embed
 
     def _create_specific_embed(self):
-        """Create the specific version selection embed."""
         embed = discord.Embed(
             title="Select Specific Versions",
-            description="Choose which versions to monitor from the dropdown below:",
-            color=discord.Color.blue()
-        )
-
-        embed.add_field(
-            name=f"Available Versions {'(Including Snapshots)' if self.showing_snapshots else '(Release Only)'}",
-            value=format_version_list(self.current_versions, max_display=15),
-            inline=False
+            description="Choose which versions to monitor:",
+            color=0x00ff00
         )
 
         if self.selected_versions:
             embed.add_field(
-                name="✅ Selected Versions",
-                value=format_version_list(self.selected_versions),
+                name="Selected Versions",
+                value=", ".join(self.selected_versions),
                 inline=False
             )
         else:
             embed.add_field(
-                name="⚠️ Selected Versions",
-                value="None selected yet",
+                name="Selected Versions",
+                value="None selected",
                 inline=False
             )
+
+        versions_to_show = self.available_versions if self.showing_snapshots else self.release_versions
+        embed.add_field(
+            name="Available Versions",
+            value=f"Showing {len(versions_to_show)} versions",
+            inline=False
+        )
 
         return embed
 
     async def _all_versions_callback(self, interaction: discord.Interaction):
-        """Monitor all versions."""
-        self.result = {
-            "type": "all",
-            "versions": self.current_versions
-        }
-
-        embed = discord.Embed(
-            title="✅ Configuration Complete",
-            description=f"Monitoring **all versions** ({len(self.current_versions)} versions)",
-            color=discord.Color.green()
-        )
-
-        await interaction.response.edit_message(embed=embed, view=None)
+        self.result = {"type": "all"}
+        await interaction.response.edit_message(content="✅ All versions selected!", embed=None, view=None)
         self.stop()
 
     async def _specific_versions_callback(self, interaction: discord.Interaction):
-        """Allow selection of specific versions."""
         self.specific_mode = True
-        self.selected_versions = []
-
-        # Build specific selection view
         self._build_specific_view()
         embed = self._create_specific_embed()
-
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def _toggle_snapshots_main(self, interaction: discord.Interaction):
-        """Toggle snapshots in main menu."""
         self.showing_snapshots = not self.showing_snapshots
-
-        # Update current versions based on snapshot setting
-        if self.showing_snapshots:
-            self.current_versions = self.available_versions.copy()
-        else:
-            self.current_versions = self.release_versions.copy()
-
-        # Rebuild main view with updated button
         self._build_main_view()
         embed = self._create_main_embed()
-
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def _toggle_snapshots_specific(self, interaction: discord.Interaction):
-        """Toggle snapshots in specific selection mode."""
         self.showing_snapshots = not self.showing_snapshots
-
-        # Update current versions based on snapshot setting
-        if self.showing_snapshots:
-            self.current_versions = self.available_versions.copy()
-        else:
-            self.current_versions = self.release_versions.copy()
-
-        # Clear selected versions that are no longer available
-        if not self.showing_snapshots:
-            # Remove any snapshots from selected versions
-            self.selected_versions = [v for v in self.selected_versions if not is_snapshot(v)]
-
-        # Rebuild specific view
         self._build_specific_view()
         embed = self._create_specific_embed()
-
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def _continue_specific(self, interaction: discord.Interaction):
-        """Continue with selected specific versions."""
-        if not self.selected_versions:
-            await interaction.response.send_message("❌ Please select at least one version.", ephemeral=True)
-            return
-
-        self.result = {
-            "type": "specific",
-            "versions": self.selected_versions
-        }
-
-        embed = discord.Embed(
-            title="✅ Configuration Complete",
-            description=f"Monitoring **{len(self.selected_versions)} selected versions**",
-            color=discord.Color.green()
-        )
-
-        embed.add_field(
-            name="Selected Versions",
-            value=format_version_list(self.selected_versions),
-            inline=False
-        )
-
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
+        if self.selected_versions:
+            self.result = {"type": "specific", "versions": self.selected_versions}
+            await interaction.response.edit_message(
+                content=f"✅ Selected versions: {', '.join(self.selected_versions)}",
+                embed=None,
+                view=None
+            )
+            self.stop()
+        else:
+            await interaction.response.send_message("Please select at least one version first.", ephemeral=True)
 
     async def _back_to_main(self, interaction: discord.Interaction):
-        """Go back to main menu."""
         self.specific_mode = False
-        # Don't clear selected versions in case user wants to go back to specific selection
-
-        # Rebuild main view
+        self.selected_versions = []
         self._build_main_view()
         embed = self._create_main_embed()
-
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def _latest_current_callback(self, interaction: discord.Interaction):
-        """Monitor only the latest version for current MC."""
-        # Get the latest version from current display
-        latest_version = self.current_versions[0] if self.current_versions else None
-
-        if not latest_version:
-            await interaction.response.send_message("❌ No versions available.", ephemeral=True)
-            return
-
-        self.result = {
-            "type": "latest_current",
-            "versions": [latest_version]
-        }
-
-        embed = discord.Embed(
-            title="✅ Configuration Complete",
-            description=f"Monitoring **latest version for current MC**: {latest_version}",
-            color=discord.Color.green()
-        )
-
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
+        if self.release_versions:
+            latest_version = self.release_versions[0]['version_number']
+            self.result = {"type": "latest_current", "version": latest_version}
+            await interaction.response.edit_message(
+                content=f"✅ Latest current version selected: {latest_version}",
+                embed=None,
+                view=None
+            )
+            self.stop()
+        else:
+            await interaction.response.send_message("No release versions available.", ephemeral=True)
 
     async def _latest_always_callback(self, interaction: discord.Interaction):
-        """Always monitor the latest version."""
-        self.result = {
-            "type": "latest_always",
-            "versions": []  # Empty list means always get latest
-        }
-
-        embed = discord.Embed(
-            title="✅ Configuration Complete",
-            description="Monitoring **latest version always** (automatically updates to newest version)",
-            color=discord.Color.green()
-        )
-
-        await interaction.response.edit_message(embed=embed, view=None)
+        self.result = {"type": "latest_always"}
+        await interaction.response.edit_message(content="✅ Latest version always selected!", embed=None, view=None)
         self.stop()
 
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
+        self.result = None
+        self.stop()
 
 
 class VersionSelect(discord.ui.Select):
-    def __init__(self, versions: List[str], parent_view: MinecraftVersionView):
+    def __init__(self, parent_view, versions):
         self.parent_view = parent_view
 
-        # Create options from versions (Discord has a 25 option limit)
         options = []
-        for version in versions[:25]:  # Limit to first 25 versions
-            # Check if already selected
-            is_selected = version in parent_view.selected_versions
+        for version in versions:
+            version_num = version.get('version_number', 'Unknown')
+            is_snapshot = version.get('snapshot', False)
+            label = f"{version_num} {'(Snapshot)' if is_snapshot else '(Release)'}"
 
             options.append(discord.SelectOption(
-                label=version,
-                value=version,
-                description=f"{'Snapshot' if is_snapshot(version) else 'Release'} version",
-                default=is_selected
+                label=label,
+                value=version_num,
+                description=f"Minecraft {version_num}",
+                default=version_num in parent_view.selected_versions
             ))
 
         super().__init__(
-            placeholder="Select versions to monitor...",
-            min_values=0,
-            max_values=len(options),
+            placeholder="Choose versions...",
+            min_values=1,
+            max_values=min(len(options), 25),
             options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # Update selected versions
-        self.parent_view.selected_versions = self.values.copy()
+        self.parent_view.selected_versions = self.values
 
-        # Update embed
+        # Update the view to show continue button
+        self.parent_view._build_specific_view()
         embed = self.parent_view._create_specific_embed()
-
-        # Update continue button state
-        for item in self.parent_view.children:
-            if isinstance(item, discord.ui.Button) and item.label == "Continue":
-                item.disabled = len(self.parent_view.selected_versions) == 0
-
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
 class LoaderView(discord.ui.View):
-    def __init__(self, available_loaders: List[str]):
-        super().__init__(timeout=300)
+    def __init__(self, available_loaders, *, timeout=120):
+        super().__init__(timeout=timeout)
         self.available_loaders = available_loaders
         self.result = None
         self.selected_loaders = []
+        self.custom_mode = False
 
-        # Create buttons for each loader
-        for i, loader in enumerate(available_loaders):
+        self._build_main_view()
+
+    def _build_main_view(self):
+        self.clear_items()
+
+        # All loaders button
+        all_button = discord.ui.Button(
+            label="All supported loaders",
+            style=discord.ButtonStyle.primary,
+            emoji="1️⃣",
+            row=0
+        )
+        all_button.callback = self._all_loaders_callback
+        self.add_item(all_button)
+
+        # Individual loader buttons
+        for i, loader in enumerate(self.available_loaders[:4]):  # Max 4 individual buttons
             button = discord.ui.Button(
-                label=loader.title(),
-                style=discord.ButtonStyle.secondary,
-                row=i // 5  # 5 buttons per row
+                label=f"{loader.title()} only",
+                style=discord.ButtonStyle.primary,
+                emoji=f"{i + 2}️⃣",
+                row=(i // 2) + 1
             )
             button.callback = self._create_loader_callback(loader)
             self.add_item(button)
 
-        # Add "All Loaders" button
-        all_btn = discord.ui.Button(
-            label="All Loaders",
-            style=discord.ButtonStyle.primary,
-            row=(len(available_loaders) // 5) + 1
-        )
-        all_btn.callback = self._all_loaders_callback
-        self.add_item(all_btn)
+        # Custom selection button if more than 1 loader
+        if len(self.available_loaders) > 1:
+            custom_button = discord.ui.Button(
+                label="Custom selection",
+                style=discord.ButtonStyle.secondary,
+                emoji="🔧",
+                row=2
+            )
+            custom_button.callback = self._custom_selection_callback
+            self.add_item(custom_button)
 
-        # Add custom selection button
-        custom_btn = discord.ui.Button(
-            label="Custom Selection",
+    def _build_custom_view(self):
+        self.clear_items()
+
+        # Loader dropdown
+        if self.available_loaders:
+            loader_select = LoaderSelect(self, self.available_loaders)
+            self.add_item(loader_select)
+
+        # Continue button (only if loaders selected)
+        if self.selected_loaders:
+            continue_button = discord.ui.Button(
+                label="Continue",
+                style=discord.ButtonStyle.success,
+                row=1
+            )
+            continue_button.callback = self._continue_callback
+            self.add_item(continue_button)
+
+        # Back button
+        back_button = discord.ui.Button(
+            label="Back",
             style=discord.ButtonStyle.secondary,
-            row=(len(available_loaders) // 5) + 1
+            row=1
         )
-        custom_btn.callback = self._custom_selection_callback
-        self.add_item(custom_btn)
+        back_button.callback = self._back_to_main
+        self.add_item(back_button)
 
-    async def _all_loaders_callback(self, interaction: discord.Interaction):
-        """Select all available loaders."""
-        self.result = {
-            "type": "all",
-            "loaders": self.available_loaders
-        }
-
+    def _create_main_embed(self):
         embed = discord.Embed(
-            title="✅ Configuration Complete",
-            description="Monitoring **all loaders**",
-            color=discord.Color.green()
+            title="Select Mod Loaders",
+            description="Which mod loaders should be monitored?",
+            color=0x00ff00
         )
 
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
+        options_text = "1️⃣ **All supported loaders** - Monitor all available loaders\n"
+        for i, loader in enumerate(self.available_loaders[:4]):
+            options_text += f"{i + 2}️⃣ **{loader.title()} only** - Monitor only {loader.title()}\n"
 
-    def _create_loader_callback(self, loader: str):
-        """Create a callback for a specific loader button."""
+        if len(self.available_loaders) > 1:
+            options_text += "🔧 **Custom selection** - Choose specific loaders"
 
-        async def callback(interaction: discord.Interaction):
-            self.result = {
-                "type": "specific",
-                "loaders": [loader]
-            }
+        embed.add_field(
+            name="Options",
+            value=options_text,
+            inline=False
+        )
 
-            embed = discord.Embed(
-                title="✅ Configuration Complete",
-                description=f"Monitoring **{loader.title()}** loader only",
-                color=discord.Color.green()
+        embed.add_field(
+            name="Available Loaders",
+            value=", ".join(loader.title() for loader in self.available_loaders),
+            inline=False
+        )
+
+        return embed
+
+    def _create_custom_embed(self):
+        embed = discord.Embed(
+            title="Select Custom Loaders",
+            description="Choose which loaders to monitor:",
+            color=0x00ff00
+        )
+
+        if self.selected_loaders:
+            embed.add_field(
+                name="Selected Loaders",
+                value=", ".join(loader.title() for loader in self.selected_loaders),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="Selected Loaders",
+                value="None selected",
+                inline=False
             )
 
-            await interaction.response.edit_message(embed=embed, view=None)
+        embed.add_field(
+            name="Available Loaders",
+            value=", ".join(loader.title() for loader in self.available_loaders),
+            inline=False
+        )
+
+        return embed
+
+    async def _all_loaders_callback(self, interaction: discord.Interaction):
+        self.result = {"type": "all"}
+        await interaction.response.edit_message(content="✅ All loaders selected!", embed=None, view=None)
+        self.stop()
+
+    def _create_loader_callback(self, loader):
+        async def callback(interaction: discord.Interaction):
+            self.result = {"type": "specific", "loaders": [loader]}
+            await interaction.response.edit_message(
+                content=f"✅ {loader.title()} selected!",
+                embed=None,
+                view=None
+            )
             self.stop()
 
         return callback
 
     async def _custom_selection_callback(self, interaction: discord.Interaction):
-        """Allow custom selection of loaders."""
-        embed = discord.Embed(
-            title="Select Loaders",
-            description="Select which loaders to monitor:",
-            color=discord.Color.blue()
-        )
-
-        view = discord.ui.View(timeout=300)
-
-        # Add loader selector
-        loader_select = LoaderSelect(self.available_loaders, self)
-        view.add_item(loader_select)
-
-        # Add continue button
-        continue_btn = discord.ui.Button(
-            label="Continue",
-            style=discord.ButtonStyle.green,
-            disabled=True
-        )
-        continue_btn.callback = self._continue_callback
-        view.add_item(continue_btn)
-
-        await interaction.response.edit_message(embed=embed, view=view)
+        self.custom_mode = True
+        self._build_custom_view()
+        embed = self._create_custom_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     async def _continue_callback(self, interaction: discord.Interaction):
-        """Continue with selected loaders."""
-        if not self.selected_loaders:
-            await interaction.response.send_message("❌ Please select at least one loader.", ephemeral=True)
-            return
+        if self.selected_loaders:
+            self.result = {"type": "specific", "loaders": self.selected_loaders}
+            await interaction.response.edit_message(
+                content=f"✅ Selected loaders: {', '.join(loader.title() for loader in self.selected_loaders)}",
+                embed=None,
+                view=None
+            )
+            self.stop()
+        else:
+            await interaction.response.send_message("Please select at least one loader first.", ephemeral=True)
 
-        self.result = {
-            "type": "specific",
-            "loaders": self.selected_loaders
-        }
-
-        embed = discord.Embed(
-            title="✅ Configuration Complete",
-            description=f"Monitoring **{len(self.selected_loaders)} selected loaders**",
-            color=discord.Color.green()
-        )
-
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
+    async def _back_to_main(self, interaction: discord.Interaction):
+        self.custom_mode = False
+        self.selected_loaders = []
+        self._build_main_view()
+        embed = self._create_main_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
+        self.result = None
+        self.stop()
 
 
 class LoaderSelect(discord.ui.Select):
-    def __init__(self, loaders: List[str], parent_view: LoaderView):
+    def __init__(self, parent_view, loaders):
         self.parent_view = parent_view
 
         options = []
@@ -505,211 +476,263 @@ class LoaderSelect(discord.ui.Select):
             options.append(discord.SelectOption(
                 label=loader.title(),
                 value=loader,
-                description=f"{loader.title()} mod loader"
+                description=f"Monitor {loader.title()} versions",
+                default=loader in parent_view.selected_loaders
             ))
 
         super().__init__(
-            placeholder="Select loaders to monitor...",
+            placeholder="Choose loaders...",
             min_values=1,
             max_values=len(options),
             options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        self.parent_view.selected_loaders = self.values.copy()
+        self.parent_view.selected_loaders = self.values
 
-        # Update continue button
-        for item in self.parent_view.children:
-            if isinstance(item, discord.ui.Button) and item.label == "Continue":
-                item.disabled = len(self.parent_view.selected_loaders) == 0
-
-        await interaction.response.edit_message(view=self.parent_view)
+        # Update the view to show continue button
+        self.parent_view._build_custom_view()
+        embed = self.parent_view._create_custom_embed()
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
 class ReleaseChannelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=300)
+    def __init__(self, *, timeout=120):
+        super().__init__(timeout=timeout)
         self.result = None
         self.selected_channels = []
+        self.custom_mode = False
 
-        # Available release channels
+        self._build_main_view()
+
+    def _build_main_view(self):
+        self.clear_items()
+
+        # All channels button
+        all_button = discord.ui.Button(
+            label="All Channels",
+            style=discord.ButtonStyle.primary,
+            emoji="1️⃣",
+            row=0
+        )
+        all_button.callback = self._all_channels_callback
+        self.add_item(all_button)
+
+        # Individual channel buttons
         channels = ["release", "beta", "alpha"]
-
-        # Create buttons for each channel
-        for channel in channels:
+        for i, channel in enumerate(channels):
             button = discord.ui.Button(
-                label=channel.title(),
-                style=discord.ButtonStyle.secondary
+                label=f"{channel.title()} channel",
+                style=discord.ButtonStyle.primary,
+                emoji=f"{i + 2}️⃣",
+                row=(i // 2) + 1
             )
             button.callback = self._create_channel_callback(channel)
             self.add_item(button)
 
-        # Add "All Channels" button
-        all_btn = discord.ui.Button(
-            label="All Channels",
-            style=discord.ButtonStyle.primary
+        # Custom selection button
+        custom_button = discord.ui.Button(
+            label="Custom selection",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔧",
+            row=2
         )
-        all_btn.callback = self._all_channels_callback
-        self.add_item(all_btn)
+        custom_button.callback = self._custom_selection_callback
+        self.add_item(custom_button)
 
-        # Add custom selection button
-        custom_btn = discord.ui.Button(
-            label="Custom Selection",
-            style=discord.ButtonStyle.secondary
+    def _build_custom_view(self):
+        self.clear_items()
+
+        # Channel dropdown
+        channel_select = ReleaseChannelSelect(self)
+        self.add_item(channel_select)
+
+        # Continue button (only if channels selected)
+        if self.selected_channels:
+            continue_button = discord.ui.Button(
+                label="Continue",
+                style=discord.ButtonStyle.success,
+                row=1
+            )
+            continue_button.callback = self._continue_callback
+            self.add_item(continue_button)
+
+        # Back button
+        back_button = discord.ui.Button(
+            label="Back",
+            style=discord.ButtonStyle.secondary,
+            row=1
         )
-        custom_btn.callback = self._custom_selection_callback
-        self.add_item(custom_btn)
+        back_button.callback = self._back_to_main
+        self.add_item(back_button)
 
-    async def _all_channels_callback(self, interaction: discord.Interaction):
-        """Select all release channels."""
-        self.result = {
-            "type": "all",
-            "channels": ["release", "beta", "alpha"]
-        }
-
+    def _create_main_embed(self):
         embed = discord.Embed(
-            title="✅ Configuration Complete",
-            description="Monitoring **all release channels**",
-            color=discord.Color.green()
+            title="Select Release Channels",
+            description="Which release channels should be monitored?",
+            color=0x00ff00
         )
 
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
+        embed.add_field(
+            name="Options",
+            value=(
+                "1️⃣ **All Channels** - Monitor all release channels\n"
+                "2️⃣ **Release channel** - Monitor only stable releases\n"
+                "3️⃣ **Beta channel** - Monitor only beta releases\n"
+                "4️⃣ **Alpha channel** - Monitor only alpha releases\n"
+                "🔧 **Custom selection** - Choose specific channels"
+            ),
+            inline=False
+        )
 
-    def _create_channel_callback(self, channel: str):
-        """Create a callback for a specific channel button."""
+        return embed
 
-        async def callback(interaction: discord.Interaction):
-            self.result = {
-                "type": "specific",
-                "channels": [channel]
-            }
+    def _create_custom_embed(self):
+        embed = discord.Embed(
+            title="Select Custom Release Channels",
+            description="Choose which release channels to monitor:",
+            color=0x00ff00
+        )
 
-            embed = discord.Embed(
-                title="✅ Configuration Complete",
-                description=f"Monitoring **{channel.title()}** releases only",
-                color=discord.Color.green()
+        if self.selected_channels:
+            embed.add_field(
+                name="Selected Channels",
+                value=", ".join(channel.title() for channel in self.selected_channels),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="Selected Channels",
+                value="None selected",
+                inline=False
             )
 
-            await interaction.response.edit_message(embed=embed, view=None)
+        embed.add_field(
+            name="Available Channels",
+            value="Release, Beta, Alpha",
+            inline=False
+        )
+
+        return embed
+
+    async def _all_channels_callback(self, interaction: discord.Interaction):
+        self.result = {"type": "all"}
+        await interaction.response.edit_message(content="✅ All channels selected!", embed=None, view=None)
+        self.stop()
+
+    def _create_channel_callback(self, channel):
+        async def callback(interaction: discord.Interaction):
+            self.result = {"type": "specific", "channels": [channel]}
+            await interaction.response.edit_message(
+                content=f"✅ {channel.title()} channel selected!",
+                embed=None,
+                view=None
+            )
             self.stop()
 
         return callback
 
     async def _custom_selection_callback(self, interaction: discord.Interaction):
-        """Allow custom selection of release channels."""
-        embed = discord.Embed(
-            title="Select Release Channels",
-            description="Select which release channels to monitor:",
-            color=discord.Color.blue()
-        )
-
-        view = discord.ui.View(timeout=300)
-
-        # Add channel selector
-        channel_select = ReleaseChannelSelect(self)
-        view.add_item(channel_select)
-
-        # Add continue button
-        continue_btn = discord.ui.Button(
-            label="Continue",
-            style=discord.ButtonStyle.green,
-            disabled=True
-        )
-        continue_btn.callback = self._continue_callback
-        view.add_item(continue_btn)
-
-        await interaction.response.edit_message(embed=embed, view=view)
+        self.custom_mode = True
+        self._build_custom_view()
+        embed = self._create_custom_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     async def _continue_callback(self, interaction: discord.Interaction):
-        """Continue with selected channels."""
-        if not self.selected_channels:
-            await interaction.response.send_message("❌ Please select at least one channel.", ephemeral=True)
-            return
+        if self.selected_channels:
+            self.result = {"type": "specific", "channels": self.selected_channels}
+            await interaction.response.edit_message(
+                content=f"✅ Selected channels: {', '.join(channel.title() for channel in self.selected_channels)}",
+                embed=None,
+                view=None
+            )
+            self.stop()
+        else:
+            await interaction.response.send_message("Please select at least one channel first.", ephemeral=True)
 
-        self.result = {
-            "type": "specific",
-            "channels": self.selected_channels
-        }
-
-        embed = discord.Embed(
-            title="✅ Configuration Complete",
-            description=f"Monitoring **{len(self.selected_channels)} selected channels**",
-            color=discord.Color.green()
-        )
-
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
+    async def _back_to_main(self, interaction: discord.Interaction):
+        self.custom_mode = False
+        self.selected_channels = []
+        self._build_main_view()
+        embed = self._create_main_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
+        self.result = None
+        self.stop()
 
 
 class ReleaseChannelSelect(discord.ui.Select):
-    def __init__(self, parent_view: ReleaseChannelView):
+    def __init__(self, parent_view):
         self.parent_view = parent_view
 
-        options = [
-            discord.SelectOption(
-                label="Release",
-                value="release",
-                description="Stable releases"
-            ),
-            discord.SelectOption(
-                label="Beta",
-                value="beta",
-                description="Beta releases"
-            ),
-            discord.SelectOption(
-                label="Alpha",
-                value="alpha",
-                description="Alpha releases"
-            )
-        ]
+        channels = ["release", "beta", "alpha"]
+        options = []
+        for channel in channels:
+            options.append(discord.SelectOption(
+                label=channel.title(),
+                value=channel,
+                description=f"Monitor {channel} versions",
+                default=channel in parent_view.selected_channels
+            ))
 
         super().__init__(
-            placeholder="Select release channels to monitor...",
+            placeholder="Choose channels...",
             min_values=1,
             max_values=len(options),
             options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        self.parent_view.selected_channels = self.values.copy()
+        self.parent_view.selected_channels = self.values
 
-        # Update continue button
-        for item in self.parent_view.children:
-            if isinstance(item, discord.ui.Button) and item.label == "Continue":
-                item.disabled = len(self.parent_view.selected_channels) == 0
-
-        await interaction.response.edit_message(view=self.parent_view)
+        # Update the view to show continue button
+        self.parent_view._build_custom_view()
+        embed = self.parent_view._create_custom_embed()
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
-class ChannelSelect(discord.ui.ChannelSelect):
-    def __init__(self, callback_func: Callable):
+class ChannelSelect(discord.ui.Select):
+    def __init__(self, channels, callback_func):
         self.callback_func = callback_func
+
+        options = []
+        for channel in channels:
+            options.append(discord.SelectOption(
+                label=f"#{channel.name}",
+                value=str(channel.id),
+                description=f"Channel: {channel.name}"
+            ))
+
         super().__init__(
-            placeholder="Select a channel...",
+            placeholder="Choose a channel...",
             min_values=1,
             max_values=1,
-            channel_types=[discord.ChannelType.text]
+            options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        channel = self.values[0]
-        await self.callback_func(interaction, channel)
+        await self.callback_func(interaction, self.values[0])
 
 
-class RoleSelect(discord.ui.RoleSelect):
-    def __init__(self, callback_func: Callable):
+class RoleSelect(discord.ui.Select):
+    def __init__(self, roles, callback_func):
         self.callback_func = callback_func
+
+        options = []
+        for role in roles:
+            options.append(discord.SelectOption(
+                label=f"@{role.name}",
+                value=str(role.id),
+                description=f"Role: {role.name}"
+            ))
+
         super().__init__(
-            placeholder="Select roles to ping (optional)...",
+            placeholder="Choose roles to ping...",
             min_values=0,
-            max_values=10
+            max_values=min(len(options), 25),
+            options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        roles = self.values
-        await self.callback_func(interaction, roles)
+        await self.callback_func(interaction, self.values)
