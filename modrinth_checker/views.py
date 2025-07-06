@@ -50,13 +50,13 @@ class MinecraftVersionView(discord.ui.View):
         """Build the main selection view."""
         self.clear_items()
 
-        # Main buttons with descriptions
+        # Main buttons
         all_btn = discord.ui.Button(
             label="All Versions",
             style=discord.ButtonStyle.primary,
             row=0
         )
-        all_btn.callback = self.all_versions_btn
+        all_btn.callback = self._all_versions_callback
         self.add_item(all_btn)
 
         specific_btn = discord.ui.Button(
@@ -64,7 +64,7 @@ class MinecraftVersionView(discord.ui.View):
             style=discord.ButtonStyle.secondary,
             row=0
         )
-        specific_btn.callback = self.specific_versions
+        specific_btn.callback = self._specific_versions_callback
         self.add_item(specific_btn)
 
         # Latest buttons
@@ -73,7 +73,7 @@ class MinecraftVersionView(discord.ui.View):
             style=discord.ButtonStyle.success,
             row=1
         )
-        latest_current_btn.callback = self.latest_current
+        latest_current_btn.callback = self._latest_current_callback
         self.add_item(latest_current_btn)
 
         latest_always_btn = discord.ui.Button(
@@ -81,7 +81,7 @@ class MinecraftVersionView(discord.ui.View):
             style=discord.ButtonStyle.success,
             row=1
         )
-        latest_always_btn.callback = self.latest_always
+        latest_always_btn.callback = self._latest_always_callback
         self.add_item(latest_always_btn)
 
         # Add snapshot toggle if available
@@ -191,8 +191,7 @@ class MinecraftVersionView(discord.ui.View):
 
         return embed
 
-    @discord.ui.button(label="All Versions", style=discord.ButtonStyle.primary, row=0)
-    async def all_versions_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _all_versions_callback(self, interaction: discord.Interaction):
         """Monitor all versions."""
         self.result = {
             "type": "all",
@@ -208,8 +207,7 @@ class MinecraftVersionView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=None)
         self.stop()
 
-    @discord.ui.button(label="Specific Versions", style=discord.ButtonStyle.secondary, row=0)
-    async def specific_versions(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _specific_versions_callback(self, interaction: discord.Interaction):
         """Allow selection of specific versions."""
         self.specific_mode = True
         self.selected_versions = []
@@ -294,8 +292,7 @@ class MinecraftVersionView(discord.ui.View):
 
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="Latest (Current MC)", style=discord.ButtonStyle.success, row=1)
-    async def latest_current(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _latest_current_callback(self, interaction: discord.Interaction):
         """Monitor only the latest version for current MC."""
         # Get the latest version from current display
         latest_version = self.current_versions[0] if self.current_versions else None
@@ -318,8 +315,7 @@ class MinecraftVersionView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=None)
         self.stop()
 
-    @discord.ui.button(label="Latest (Always)", style=discord.ButtonStyle.success, row=1)
-    async def latest_always(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _latest_always_callback(self, interaction: discord.Interaction):
         """Always monitor the latest version."""
         self.result = {
             "type": "latest_always",

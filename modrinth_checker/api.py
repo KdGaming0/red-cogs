@@ -112,16 +112,25 @@ class ModrinthAPI:
                     if clean_v.startswith('v'):
                         clean_v = clean_v[1:]
 
-                    return pkg_version.parse(clean_v)
+                    # Try to parse as version
+                    parsed = pkg_version.parse(clean_v)
+                    return (0, parsed)  # 0 for releases, 1 for pre-releases
                 except:
                     # Fall back to string representation for sorting
-                    return str(v)
+                    # Put snapshots at the end by using tuple (1, string)
+                    if any(char.isalpha() for char in str(v)) and 'w' in str(v):
+                        return (1, str(v))  # Likely a snapshot
+                    return (0, str(v))  # Likely a release
 
             version_list.sort(key=sort_key, reverse=True)
         except Exception as e:
             log.warning(f"Error sorting game versions: {e}")
             # Fall back to simple string sorting
-            version_list.sort(reverse=True)
+            try:
+                version_list.sort(key=str, reverse=True)
+            except Exception as e2:
+                log.warning(f"Error in fallback sorting: {e2}")
+                # If all else fails, just return the list as-is
 
         return version_list
 
