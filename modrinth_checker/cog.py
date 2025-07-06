@@ -188,19 +188,17 @@ class ModrinthChecker(red_commands.Cog):
             log.error(f"Error setting up project monitoring: {e}")
             await message.edit(content="❌ An error occurred during setup.", embed=None, view=None)
 
-    async def _setup_minecraft_versions(self, ctx, available_versions: List[str], message: discord.Message) -> Optional[Dict[str, Any]]:
+    async def _setup_minecraft_versions(self, ctx, available_versions: List[str], message: discord.Message) -> Optional[
+        Dict[str, Any]]:
         """Set up Minecraft version monitoring."""
-        # Check for snapshots
-        has_snapshots = any(self._is_snapshot(v) for v in available_versions)
-        
-        # Create the view first
-        view = MinecraftVersionView(available_versions, has_snapshots)
-        
+        # Create the view - the view will automatically detect snapshots internally
+        view = MinecraftVersionView(available_versions)
+
         # Create the initial embed using the view's method
         embed = view._create_main_embed()
-        
+
         await message.edit(embed=embed, view=view)
-        
+
         await view.wait()
         return view.result
 
