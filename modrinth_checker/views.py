@@ -28,9 +28,16 @@ class ConfirmView(discord.ui.View):
 class MinecraftVersionView(discord.ui.View):
     def __init__(self, available_versions, *, timeout=120):
         super().__init__(timeout=timeout)
-        self.available_versions = available_versions
-        self.release_versions = [v for v in available_versions if not v.get('snapshot', False)]
-        self.has_snapshots = any(v.get('snapshot', False) for v in available_versions)
+        # Handle both list of strings and list of dicts
+        if available_versions and isinstance(available_versions[0], str):
+            # Convert string list to dict format
+            self.available_versions = [{"version_number": v, "snapshot": self._is_snapshot(v)} for v in
+                                       available_versions]
+        else:
+            self.available_versions = available_versions or []
+
+        self.release_versions = [v for v in self.available_versions if not v.get('snapshot', False)]
+        self.has_snapshots = any(v.get('snapshot', False) for v in self.available_versions)
         self.result = None
         self.selected_versions = []
         self.specific_mode = False
@@ -40,6 +47,11 @@ class MinecraftVersionView(discord.ui.View):
         self.current_versions = self.release_versions[:5] if self.release_versions else []
 
         self._build_main_view()
+
+    def _is_snapshot(self, version: str) -> bool:
+        """Check if a version is a snapshot."""
+        version_lower = version.lower()
+        return any(indicator in version_lower for indicator in ['snapshot', 'alpha', 'beta', 'rc', 'pre', 'w'])
 
     def _build_main_view(self):
         self.clear_items()
@@ -265,8 +277,13 @@ class VersionSelect(discord.ui.Select):
 
         options = []
         for version in versions:
-            version_num = version.get('version_number', 'Unknown')
-            is_snapshot = version.get('snapshot', False)
+            if isinstance(version, dict):
+                version_num = version.get('version_number', 'Unknown')
+                is_snapshot = version.get('snapshot', False)
+            else:
+                version_num = str(version)
+                is_snapshot = parent_view._is_snapshot(version_num)
+
             label = f"{version_num} {'(Snapshot)' if is_snapshot else '(Release)'}"
 
             options.append(discord.SelectOption(
@@ -295,7 +312,7 @@ class VersionSelect(discord.ui.Select):
 class LoaderView(discord.ui.View):
     def __init__(self, available_loaders, *, timeout=120):
         super().__init__(timeout=timeout)
-        self.available_loaders = available_loaders
+        self.available_loaders = available_loaders or []
         self.result = None
         self.selected_loaders = []
         self.custom_mode = False
