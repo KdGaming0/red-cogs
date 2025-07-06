@@ -77,7 +77,13 @@ class ModrinthAPI:
             return None
 
         # Sort by date_published (most recent first)
-        versions.sort(key=lambda x: datetime.fromisoformat(x["date_published"].replace('Z', '+00:00')), reverse=True)
+        try:
+            versions.sort(key=lambda x: datetime.fromisoformat(x["date_published"].replace('Z', '+00:00')),
+                          reverse=True)
+        except Exception as e:
+            log.warning(f"Error sorting versions by date: {e}")
+            # If date sorting fails, just return the first version
+
         return versions[0] if versions else None
 
     async def get_project_game_versions(self, project_id: str) -> List[str]:
@@ -90,7 +96,34 @@ class ModrinthAPI:
         for version in versions:
             game_versions.update(version.get("game_versions", []))
 
-        return sorted(list(game_versions), reverse=True)
+        # Convert to list and sort safely
+        version_list = list(game_versions)
+        try:
+            # Try to sort versions intelligently
+            from packaging import version as pkg_version
+
+            def sort_key(v):
+                try:
+                    # Clean up the version string for parsing
+                    clean_v = str(v).strip()
+                    # Remove common prefixes
+                    if clean_v.startswith('mc'):
+                        clean_v = clean_v[2:]
+                    if clean_v.startswith('v'):
+                        clean_v = clean_v[1:]
+
+                    return pkg_version.parse(clean_v)
+                except:
+                    # Fall back to string representation for sorting
+                    return str(v)
+
+            version_list.sort(key=sort_key, reverse=True)
+        except Exception as e:
+            log.warning(f"Error sorting game versions: {e}")
+            # Fall back to simple string sorting
+            version_list.sort(reverse=True)
+
+        return version_list
 
     async def get_project_loaders(self, project_id: str) -> List[str]:
         """Get all loaders supported by a project."""

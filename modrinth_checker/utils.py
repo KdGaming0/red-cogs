@@ -1,6 +1,9 @@
 import re
 from typing import List, Optional, Dict, Any
 from packaging import version
+import logging
+
+log = logging.getLogger("red.modrinth_checker")
 
 
 def extract_version_number(version_string: str) -> Optional[str]:
@@ -25,8 +28,8 @@ def compare_versions(version1: str, version2: str) -> int:
     """Compare two version strings. Returns 1 if version1 > version2, -1 if version1 < version2, 0 if equal."""
     try:
         # Try to parse as semantic versions
-        v1 = version.parse(version1)
-        v2 = version.parse(version2)
+        v1 = version.parse(str(version1))
+        v2 = version.parse(str(version2))
 
         if v1 > v2:
             return 1
@@ -34,11 +37,12 @@ def compare_versions(version1: str, version2: str) -> int:
             return -1
         else:
             return 0
-    except Exception:
+    except Exception as e:
+        log.warning(f"Version comparison failed for '{version1}' vs '{version2}': {e}")
         # Fall back to string comparison
-        if version1 > version2:
+        if str(version1) > str(version2):
             return 1
-        elif version1 < version2:
+        elif str(version1) < str(version2):
             return -1
         else:
             return 0
@@ -51,7 +55,7 @@ def is_snapshot(version_string: str) -> bool:
         'dev', 'experimental', 'test', 'snapshot'
     ]
 
-    version_lower = version_string.lower()
+    version_lower = str(version_string).lower()
     return any(indicator in version_lower for indicator in snapshot_indicators)
 
 
@@ -68,9 +72,21 @@ def format_version_list(versions: List[str], max_display: int = 10) -> str:
     if not versions:
         return "None"
 
-    # Sort versions in descending order
-    sorted_versions = sorted(versions, key=lambda x: version.parse(x) if x.replace('.', '').isdigit() else x,
-                             reverse=True)
+    try:
+        # Sort versions in descending order
+        def sort_key(x):
+            try:
+                # Try to parse as semantic version
+                return version.parse(str(x))
+            except:
+                # Fall back to string sorting
+                return str(x)
+
+        sorted_versions = sorted(versions, key=sort_key, reverse=True)
+    except Exception as e:
+        log.warning(f"Error sorting versions: {e}")
+        # Fall back to simple string sorting
+        sorted_versions = sorted(versions, reverse=True)
 
     if len(sorted_versions) <= max_display:
         return ", ".join(sorted_versions)
