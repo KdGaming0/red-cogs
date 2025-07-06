@@ -46,15 +46,33 @@ class ModrinthChecker(commands.Cog):
 
     def _is_snapshot(self, version: str) -> bool:
         """Check if a Minecraft version is a snapshot."""
+        # Special snapshots and joke versions
+        special_snapshots = [
+            '25w14craftmine',  # April Fools 2025
+            '24w14potato',  # April Fools 2024
+            '23w13a_or_b',  # April Fools 2023
+            '22w13oneblockatatime',  # April Fools 2022
+            '20w14infinite',  # April Fools 2020
+            '3d shareware v1.34',  # April Fools 2019
+            '1.rv-pre1',  # April Fools 2016
+            '15w14a',  # April Fools 2015
+        ]
+
+        # Check special snapshots first
+        if version.lower() in [s.lower() for s in special_snapshots]:
+            return True
+
         # Snapshot patterns: 25w21a, 1.21-pre1, 1.21-rc1, etc.
         snapshot_patterns = [
             r'^\d+w\d+[a-z]$',  # Weekly snapshots like 25w21a
             r'.*-pre\d+$',  # Pre-releases like 1.21-pre1
             r'.*-rc\d+$',  # Release candidates like 1.21-rc1
             r'.*snapshot.*',  # Any version with "snapshot"
+            r'.*experimental.*',  # Experimental snapshots
+            r'.*combat.*test.*',  # Combat test snapshots
         ]
 
-        for pattern in snapshot_patterns:  # Fixed: was 'patterns', now 'snapshot_patterns'
+        for pattern in snapshot_patterns:
             if re.match(pattern, version, re.IGNORECASE):
                 return True
         return False
@@ -1082,27 +1100,40 @@ class MinecraftVersionView(discord.ui.View):
             item.disabled = True
 
 
-class VersionSelectView(discord.ui.View):
-    def __init__(self, versions, has_snapshots, parent_view):
-        super().__init__(timeout=120)
-        self.versions = versions
-        self.has_snapshots = has_snapshots
-        self.parent_view = parent_view
-        self.selected_versions = []
+class VersionSelect(discord.ui.Select):
+    def __init__(self, versions):
+        options = [
+            discord.SelectOption(
+                label=version,
+                value=version,
+                description=f"Minecraft {version}"
+            )
+            for version in versions[:25]  # Ensure we don't exceed Discord's limit
+        ]
 
-        # Add version dropdown
-        if len(versions) > 0:
-            self.add_item(VersionSelect(versions[:25]))  # Discord limit of 25 options
+        super().__init__(
+            placeholder="Select Minecraft versions...",
+            min_values=1,
+            max_values=min(len(options), 25),
+            options=options
+        )
 
-        # Add continue button
-        continue_btn = discord.ui.Button(label="Continue", style=discord.ButtonStyle.green, row=2)
-        continue_btn.callback = self.continue_callback
-        self.add_item(continue_btn)
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_versions = self.values
 
-        # Add back button
-        back_btn = discord.ui.Button(label="← Back", style=discord.ButtonStyle.gray, row=2)
-        back_btn.callback = self.back_callback
-        self.add_item(back_btn)
+        embed = discord.Embed(
+            title="Select Specific Minecraft Versions",
+            description="Select up to 25 versions to monitor:",
+            color=0x1bd96a
+        )
+
+        embed.add_field(
+            name="Selected Versions",
+            value=", ".join(self.values) if self.values else "None selected",
+            inline=False  # Remove the 'color' parameter - it doesn't exist for add_field
+        )
+
+        await interaction.response.edit_message(embed=embed, view=self.view)
 
     async def continue_callback(self, interaction: discord.Interaction):
         if not self.selected_versions:
