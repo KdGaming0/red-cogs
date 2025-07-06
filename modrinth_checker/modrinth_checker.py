@@ -1008,8 +1008,6 @@ class MinecraftVersionView(discord.ui.View):
 
     @discord.ui.button(label="2️⃣ Specific versions", style=discord.ButtonStyle.secondary)
     async def specific_versions(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.specific_mode = True
-
         # Create dropdown for version selection
         embed = discord.Embed(
             title="Select Specific Minecraft Versions",
@@ -1017,13 +1015,10 @@ class MinecraftVersionView(discord.ui.View):
             color=0x1bd96a
         )
 
-        view = VersionSelectView(self.release_versions if not self.showing_snapshots else self.all_versions,
-                                 self.has_snapshots)
+        versions_to_use = self.release_versions if not self.showing_snapshots else self.all_versions
+        view = VersionSelectView(versions_to_use, self.has_snapshots, self)
         await interaction.response.edit_message(embed=embed, view=view)
-        await view.wait()
-
-        self.result = view.selected_versions
-        self.stop()
+        # Don't wait here - let the view handle setting the result
 
     @discord.ui.button(label="3️⃣ Latest current version", style=discord.ButtonStyle.secondary)
     async def latest_current(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1088,12 +1083,12 @@ class MinecraftVersionView(discord.ui.View):
 
 
 class VersionSelectView(discord.ui.View):
-    def __init__(self, versions, has_snapshots):
+    def __init__(self, versions, has_snapshots, parent_view):
         super().__init__(timeout=120)
         self.versions = versions
         self.has_snapshots = has_snapshots
+        self.parent_view = parent_view
         self.selected_versions = []
-        self.showing_snapshots = False
 
         # Add version dropdown
         if len(versions) > 0:
@@ -1104,26 +1099,78 @@ class VersionSelectView(discord.ui.View):
         continue_btn.callback = self.continue_callback
         self.add_item(continue_btn)
 
-        # Add snapshot toggle if needed
-        if has_snapshots:
-            snapshot_btn = discord.ui.Button(label="📸 Toggle Snapshots", style=discord.ButtonStyle.gray, row=2)
-            snapshot_btn.callback = self.toggle_snapshots
-            self.add_item(snapshot_btn)
+        # Add back button
+        back_btn = discord.ui.Button(label="← Back", style=discord.ButtonStyle.gray, row=2)
+        back_btn.callback = self.back_callback
+        self.add_item(back_btn)
 
     async def continue_callback(self, interaction: discord.Interaction):
         if not self.selected_versions:
             await interaction.response.send_message("❌ Please select at least one version.", ephemeral=True)
             return
-        self.stop()
-        await interaction.response.defer()
 
-    async def toggle_snapshots(self, interaction: discord.Interaction):
-        # This would need to be implemented to switch between release and snapshot versions
-        await interaction.response.send_message("Snapshot toggle not yet implemented.", ephemeral=True)
+        # Set the result in the parent view and stop it
+        self.parent_view.result = self.selected_versions
+        self.parent_view.stop()
+
+        embed = discord.Embed(
+            title="✅ Versions Selected",
+            description=f"Selected versions: {', '.join(self.selected_versions)}",
+            color=0x00ff00
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+    async def back_callback(self, interaction: discord.Interaction):
+        # Go back to the main minecraft version selection
+        embed = discord.Embed(
+            title="Minecraft Version Configuration",
+            description="Which Minecraft versions should be monitored?",
+            color=0x1bd96a
+        )
+
+        embed.add_field(
+            name="Options Explained:",
+            value=(
+                "🟢 **All supported versions** - Monitor all current and future versions\n"
+                "🔹 **Specific versions** - Select individual versions to monitor\n"
+                "📋 **Latest current version** - Monitor only the current latest version\n"
+                "🔄 **Latest version always** - Auto-update to newest supported version"
+            ),
+            inline=False
+        )
+
+        # Show appropriate versions
+        versions_to_show = self.parent_view.all_versions if self.parent_view.showing_snapshots else self.parent_view.release_versions
+        version_display = ", ".join(versions_to_show[:15])
+        if len(versions_to_show) > 15:
+            version_display += f" (+{len(versions_to_show) - 15} more)"
+
+        version_type = "All Versions" if self.parent_view.showing_snapshots else "Releases"
+        embed.add_field(
+            name=f"Available Versions ({version_type})",
+            value=version_display,
+            inline=False
+        )
+
+        if self.parent_view.has_snapshots:
+            embed.add_field(
+                name="Note",
+                value="📸 Click 'Show Snapshots' to see experimental versions",
+                inline=False
+            )
+
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
+
+        embed = discord.Embed(
+            title="⏰ Selection Timed Out",
+            description="Version selection timed out. Please try again.",
+            color=0xff0000
+        )
+        # Note: We can't edit the message here since we don't have the interaction
 
 
 class VersionSelect(discord.ui.Select):
@@ -1134,7 +1181,7 @@ class VersionSelect(discord.ui.Select):
                 value=version,
                 description=f"Minecraft {version}"
             )
-            for version in versions
+            for version in versions[:25]  # Ensure we don't exceed Discord's limit
         ]
 
         super().__init__(
@@ -1148,8 +1195,14 @@ class VersionSelect(discord.ui.Select):
         self.view.selected_versions = self.values
 
         embed = discord.Embed(
-            title="Selected Versions",
-            description=f"Selected: {', '.join(self.values)}",
+            title="Select Specific Minecraft Versions",
+            description="Select up to 25 versions to monitor:",
+            color=0x1bd96a
+        )
+
+        embed.add_field(
+            name="Selected Versions",
+            value=", ".join(self.values) if self.values else "None selected",
             color=0x1bd96a
         )
 
