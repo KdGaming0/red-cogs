@@ -49,6 +49,9 @@ class ModrinthWatcher(commands.Cog):
         # Start the background checking loop
         self.check_loop_task = self.bot.loop.create_task(self.check_loop())
 
+        # Correctly initialize the app command group on the instance
+        self.mwatch = app_commands.Group(name="mwatch", description="Commands to watch Modrinth projects.")
+
     def cog_unload(self):
         """Clean up when cog is unloaded."""
         self.check_loop_task.cancel()
@@ -210,9 +213,7 @@ class ModrinthWatcher(commands.Cog):
 
     # --- App Commands ---
 
-    mwatch = app_commands.Group(name="mwatch", description="Commands to watch Modrinth projects.")
-
-    @mwatch.command(name="track")
+    @app_commands.command()
     @app_commands.describe(
         project_id_or_slug="The project ID or slug from Modrinth (e.g., 'sodium' or 'AANobbMI').",
         channel="The channel where update notifications should be sent.",
@@ -260,7 +261,7 @@ class ModrinthWatcher(commands.Cog):
         await interaction.followup.send(
             f"Successfully started tracking '{project_data['title']}'! Updates will be posted in {channel.mention}.")
 
-    @mwatch.command(name="untrack")
+    @app_commands.command()
     @app_commands.describe(project_id_or_slug="The project ID or slug to stop tracking.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def untrack_project(self, interaction: discord.Interaction, project_id_or_slug: str):
@@ -292,7 +293,7 @@ class ModrinthWatcher(commands.Cog):
 
         await interaction.followup.send(f"Successfully stopped tracking '{project_title}'.")
 
-    @mwatch.command(name="list")
+    @app_commands.command()
     @app_commands.checks.has_permissions(manage_guild=True)
     async def list_tracked(self, interaction: discord.Interaction):
         """Lists all Modrinth projects being tracked in this server."""
@@ -321,3 +322,9 @@ class ModrinthWatcher(commands.Cog):
         for page in pagify(description, page_length=4000):
             embed.description = page
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# Add the commands to the cog class after they are defined
+ModrinthWatcher.mwatch.add_command(ModrinthWatcher.track_project)
+ModrinthWatcher.mwatch.add_command(ModrinthWatcher.untrack_project)
+ModrinthWatcher.mwatch.add_command(ModrinthWatcher.list_tracked)
