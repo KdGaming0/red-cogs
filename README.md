@@ -14,5 +14,5 @@ A comprehensive Red Discord Bot cog that monitors Modrinth projects for updates 
 
 ```bash
 [p]repo add kdgaming-cogs https://github.com/KdGaming0/red-cogs
-[p]cog install kdgaming-cogs modrinthwatcher
-[p]load modrinthwatcher
+[p]cog install kdgaming-cogs projecttracker
+[p]load projecttracker
