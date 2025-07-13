@@ -141,9 +141,13 @@ class ProjectTracker(commands.Cog):
         # Build message
         message_parts = []
 
-        # Custom start message
+        # Custom start message or default
         if custom_config.get("start_message"):
             message_parts.append(custom_config["start_message"])
+        else:
+            # Default start message
+            message_parts.append(
+                f"🎉 A new update for **{project_name}** has been released! Find it with the link below.")
 
         # Main update info
         message_parts.append(f"# 🔄 {project_name} - {version_number}")
@@ -217,12 +221,14 @@ class ProjectTracker(commands.Cog):
             message = self.format_update_message(project_id, project_info, version_info, custom_config)
 
             # Split message if too long
-            for page in pagify(message, delims=["\n\n", "\n"], page_length=2000):
+            pages = list(pagify(message, delims=["\n\n", "\n"], page_length=2000))
+
+            for i, page in enumerate(pages):
                 embed = discord.Embed(description=page, color=discord.Color.green())
 
-                # Add role ping if configured
+                # Add role ping only to the first message
                 content = None
-                if config.get("ping_role_id"):
+                if i == 0 and config.get("ping_role_id"):
                     role = guild.get_role(config["ping_role_id"])
                     if role:
                         content = role.mention
