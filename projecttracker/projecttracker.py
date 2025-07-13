@@ -114,13 +114,19 @@ class ProjectTracker(commands.Cog):
         return None
 
     def format_update_message(self, project_id: str, project_info: Dict[str, Any], version_info: Dict[str, Any],
-                              custom_config: Dict[str, Any]) -> str:
+                              custom_config: Dict[str, Any], mc_version: Optional[str] = None) -> str:
         """Format the update message for Discord."""
         project_name = project_info.get("title", "Unknown Project")
         version_number = version_info.get("version_number", "Unknown Version")
         date_published = version_info.get("date_published", "")
         changelog = version_info.get("changelog", "No changelog provided.")
         version_id = version_info.get("id", "")
+
+        # Get MC version info from version data
+        game_versions = version_info.get("game_versions", [])
+        mc_version_display = f" for MC {mc_version}" if mc_version else ""
+        if not mc_version and game_versions:
+            mc_version_display = f" for MC {', '.join(game_versions)}"
 
         # Get download link (prefer primary file)
         download_url = "No download available"
@@ -147,12 +153,14 @@ class ProjectTracker(commands.Cog):
         else:
             # Default start message
             message_parts.append(
-                f"🎉 A new update for **{project_name}** has been released! Find it with the link below.")
+                f"🎉 A new update for **{project_name}** has been released{mc_version_display}! Find it with the link below.")
 
         # Main update info
         message_parts.append(f"# 🔄 {project_name} - {version_number}")
         if formatted_date:
             message_parts.append(f"**Published:** {formatted_date}")
+        if mc_version_display:
+            message_parts.append(f"**Minecraft Version:** {mc_version_display[5:]}")  # Remove " for "
 
         if version_id:
             message_parts.append(
@@ -181,28 +189,51 @@ class ProjectTracker(commands.Cog):
 
             # Check each tracking configuration
             for config in track_configs:
-                mc_version = config.get("mc_version")
-                latest_version = await self.get_latest_version(project_id, mc_version)
+                mc_versions = config.get("mc_versions")  # List of MC versions or None
+                last_version_ids = config.get("last_version_ids", {})
 
-                if not latest_version:
-                    continue
+                # Handle both old format (single mc_version) and new format (multiple mc_versions)
+                if mc_versions is None:
+                    # Old format or no MC version filter
+                    versions_to_check = [None]
+                elif isinstance(mc_versions, str):
+                    # Migration from old format
+                    versions_to_check = [mc_versions]
+                    # Update to new format
+                    config["mc_versions"] = [mc_versions]
+                    if "last_version_id" in config:
+                        config["last_version_ids"] = {mc_versions: config["last_version_id"]}
+                        del config["last_version_id"]
+                else:
+                    # New format with multiple versions
+                    versions_to_check = mc_versions
 
-                # Check if this is a new version
-                last_version_id = config.get("last_version_id")
-                current_version_id = latest_version.get("id")
+                # Check each MC version
+                for mc_version in versions_to_check:
+                    latest_version = await self.get_latest_version(project_id, mc_version)
 
-                if last_version_id != current_version_id:
-                    # New version found!
-                    await self.send_update_message(guild_id, project_id, project_info, latest_version, config)
+                    if not latest_version:
+                        continue
 
-                    # Update stored version
-                    config["last_version_id"] = current_version_id
+                    # Check if this is a new version
+                    last_version_id = last_version_ids.get(mc_version)
+                    current_version_id = latest_version.get("id")
+
+                    if last_version_id != current_version_id:
+                        # New version found!
+                        await self.send_update_message(guild_id, project_id, project_info, latest_version, config,
+                                                       mc_version)
+
+                        # Update stored version
+                        last_version_ids[mc_version] = current_version_id
+                        config["last_version_ids"] = last_version_ids
 
         except Exception as e:
             log.error(f"Error checking updates for project {project_id}: {e}")
 
     async def send_update_message(self, guild_id: int, project_id: str, project_info: Dict[str, Any],
-                                  version_info: Dict[str, Any], config: Dict[str, Any]):
+                                  version_info: Dict[str, Any], config: Dict[str, Any],
+                                  mc_version: Optional[str] = None):
         """Send update message to Discord channel."""
         try:
             guild = self.bot.get_guild(guild_id)
@@ -218,7 +249,7 @@ class ProjectTracker(commands.Cog):
             custom_config = custom_messages.get(project_id, {})
 
             # Format message
-            message = self.format_update_message(project_id, project_info, version_info, custom_config)
+            message = self.format_update_message(project_id, project_info, version_info, custom_config, mc_version)
 
             # Split message if too long
             pages = list(pagify(message, delims=["\n\n", "\n"], page_length=2000))
@@ -257,7 +288,7 @@ class ProjectTracker(commands.Cog):
 
     @track.command(name="add")
     async def track_add(self, ctx, project_id: str, channel: discord.TextChannel,
-                        role: Optional[discord.Role] = None, mc_version: Optional[str] = None):
+                        role: Optional[discord.Role] = None, *mc_versions: str):
         """
         Track a Modrinth project for updates.
 
@@ -265,7 +296,7 @@ class ProjectTracker(commands.Cog):
         - project_id: The Modrinth project ID or slug
         - channel: Channel to post updates to
         - role: Optional role to ping on updates
-        - mc_version: Optional Minecraft version to filter (e.g., 1.21.4)
+        - mc_versions: One or more Minecraft versions to filter (e.g., 1.21.4 1.21.5)
         """
         # Validate project exists
         project_info = await self.get_project_info(project_id)
@@ -273,30 +304,47 @@ class ProjectTracker(commands.Cog):
             await ctx.send(f"❌ Could not find project with ID: {project_id}")
             return
 
+        # Convert mc_versions tuple to list, or use None if empty
+        mc_versions_list = list(mc_versions) if mc_versions else None
+
         # Get current tracking config
         guild_config = self.config.guild(ctx.guild)
         tracked_projects = await guild_config.tracked_projects()
 
-        # Check if project is already tracked in this channel
+        # Check if project is already tracked in this channel with same MC versions
         if project_id in tracked_projects:
             for config in tracked_projects[project_id]:
-                if config["channel_id"] == channel.id and config.get("mc_version") == mc_version:
+                if (config["channel_id"] == channel.id and
+                        config.get("mc_versions") == mc_versions_list):
+                    versions_str = ", ".join(mc_versions_list) if mc_versions_list else "any"
                     await ctx.send(
-                        f"❌ Project {project_info['title']} is already tracked in {channel.mention} for MC version {mc_version or 'any'}")
+                        f"❌ Project {project_info['title']} is already tracked in {channel.mention} for MC versions: {versions_str}")
                     return
 
-        # Get latest version to initialize tracking
-        latest_version = await self.get_latest_version(project_id, mc_version)
-        if not latest_version:
-            await ctx.send(f"❌ Could not find any versions for project {project_info['title']}")
-            return
+        # Initialize last_version_ids for each MC version
+        last_version_ids = {}
+        if mc_versions_list:
+            for mc_version in mc_versions_list:
+                latest_version = await self.get_latest_version(project_id, mc_version)
+                if latest_version:
+                    last_version_ids[mc_version] = latest_version.get("id")
+                else:
+                    await ctx.send(f"⚠️ Warning: Could not find any versions for MC {mc_version}")
+        else:
+            # No MC version filter
+            latest_version = await self.get_latest_version(project_id, None)
+            if latest_version:
+                last_version_ids[None] = latest_version.get("id")
+            else:
+                await ctx.send(f"❌ Could not find any versions for project {project_info['title']}")
+                return
 
         # Create tracking configuration
         track_config = {
             "channel_id": channel.id,
             "ping_role_id": role.id if role else None,
-            "mc_version": mc_version,
-            "last_version_id": latest_version.get("id"),
+            "mc_versions": mc_versions_list,
+            "last_version_ids": last_version_ids,
             "added_by": ctx.author.id,
             "added_at": datetime.now().isoformat()
         }
@@ -309,7 +357,11 @@ class ProjectTracker(commands.Cog):
         await guild_config.tracked_projects.set(tracked_projects)
 
         # Confirmation message
-        version_info = f" (MC {mc_version})" if mc_version else ""
+        if mc_versions_list:
+            versions_str = ", ".join(mc_versions_list)
+            version_info = f" (MC versions: {versions_str})"
+        else:
+            version_info = " (all MC versions)"
         role_info = f" pinging {role.mention}" if role else ""
         await ctx.send(f"✅ Now tracking **{project_info['title']}**{version_info} in {channel.mention}{role_info}")
 
@@ -379,7 +431,18 @@ class ProjectTracker(commands.Cog):
                     if role:
                         role_info = f" (pings {role.mention})"
 
-                mc_info = f" [MC {config['mc_version']}]" if config.get("mc_version") else ""
+                # Handle both old and new MC version formats
+                mc_versions = config.get("mc_versions")
+                if mc_versions:
+                    if isinstance(mc_versions, list):
+                        mc_info = f" [MC {', '.join(mc_versions)}]"
+                    else:
+                        mc_info = f" [MC {mc_versions}]"
+                elif config.get("mc_version"):  # Legacy format
+                    mc_info = f" [MC {config['mc_version']}]"
+                else:
+                    mc_info = ""
+
                 config_lines.append(f"• {channel_name}{role_info}{mc_info}")
 
             embed.add_field(
@@ -466,16 +529,30 @@ class ProjectTracker(commands.Cog):
                 if not channel:
                     continue
 
-                latest_version = await self.get_latest_version(proj_id, config.get("mc_version"))
-                if not latest_version:
-                    continue
+                # Handle both old and new MC version formats
+                mc_versions = config.get("mc_versions")
+                if mc_versions:
+                    if isinstance(mc_versions, list):
+                        versions_to_check = mc_versions
+                    else:
+                        versions_to_check = [mc_versions]
+                elif config.get("mc_version"):  # Legacy format
+                    versions_to_check = [config["mc_version"]]
+                else:
+                    versions_to_check = [None]
 
-                # Get custom message configuration
-                custom_messages = await guild_config.custom_messages()
-                custom_config = custom_messages.get(proj_id, {})
+                for mc_version in versions_to_check:
+                    latest_version = await self.get_latest_version(proj_id, mc_version)
+                    if not latest_version:
+                        continue
 
-                # Send the latest version info
-                await self.send_update_message(ctx.guild.id, proj_id, project_info, latest_version, config)
+                    # Get custom message configuration
+                    custom_messages = await guild_config.custom_messages()
+                    custom_config = custom_messages.get(proj_id, {})
+
+                    # Send the latest version info
+                    await self.send_update_message(ctx.guild.id, proj_id, project_info, latest_version, config,
+                                                   mc_version)
 
         await ctx.send("✅ Latest version info sent!")
 
