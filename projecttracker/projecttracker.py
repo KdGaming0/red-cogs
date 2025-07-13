@@ -15,7 +15,7 @@ class ProjectTracker(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=1234567890)
+        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
 
         # Default settings
         default_global = {
@@ -208,6 +208,9 @@ class ProjectTracker(commands.Cog):
                     # New format with multiple versions
                     versions_to_check = mc_versions
 
+                # Track if any version was updated
+                config_updated = False
+
                 # Check each MC version
                 for mc_version in versions_to_check:
                     latest_version = await self.get_latest_version(project_id, mc_version)
@@ -216,17 +219,28 @@ class ProjectTracker(commands.Cog):
                         continue
 
                     # Check if this is a new version
-                    last_version_id = last_version_ids.get(mc_version)
+                    version_key = mc_version if mc_version else "all"
+                    last_version_id = last_version_ids.get(version_key)
                     current_version_id = latest_version.get("id")
+
+                    # Log for debugging
+                    log.debug(
+                        f"Checking {project_id} MC:{mc_version} - Last: {last_version_id}, Current: {current_version_id}")
 
                     if last_version_id != current_version_id:
                         # New version found!
+                        log.info(f"New version found for {project_id} MC:{mc_version}: {current_version_id}")
+
                         await self.send_update_message(guild_id, project_id, project_info, latest_version, config,
                                                        mc_version)
 
                         # Update stored version
-                        last_version_ids[mc_version] = current_version_id
-                        config["last_version_ids"] = last_version_ids
+                        last_version_ids[version_key] = current_version_id
+                        config_updated = True
+
+                # Only update config if something changed
+                if config_updated:
+                    config["last_version_ids"] = last_version_ids
 
         except Exception as e:
             log.error(f"Error checking updates for project {project_id}: {e}")
@@ -331,10 +345,10 @@ class ProjectTracker(commands.Cog):
                 else:
                     await ctx.send(f"⚠️ Warning: Could not find any versions for MC {mc_version}")
         else:
-            # No MC version filter
+            # No MC version filter - use "all" as key
             latest_version = await self.get_latest_version(project_id, None)
             if latest_version:
-                last_version_ids[None] = latest_version.get("id")
+                last_version_ids["all"] = latest_version.get("id")
             else:
                 await ctx.send(f"❌ Could not find any versions for project {project_info['title']}")
                 return
@@ -363,7 +377,8 @@ class ProjectTracker(commands.Cog):
         else:
             version_info = " (all MC versions)"
         role_info = f" pinging {role.mention}" if role else ""
-        await ctx.send(f"✅ Now tracking **{project_info['title']}**{version_info} in {channel.mention}{role_info}")
+        await ctx.send(
+            f"✅ Now tracking **{project_info['title']}** ({project_id}){version_info} in {channel.mention}{role_info}")
 
     @track.command(name="remove")
     async def track_remove(self, ctx, project_id: str, channel: Optional[discord.TextChannel] = None):
@@ -446,7 +461,7 @@ class ProjectTracker(commands.Cog):
                 config_lines.append(f"• {channel_name}{role_info}{mc_info}")
 
             embed.add_field(
-                name=f"📦 {project_name}",
+                name=f"📦 {project_name} ({project_id})",
                 value="\n".join(config_lines),
                 inline=False
             )
