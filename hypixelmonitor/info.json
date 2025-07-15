@@ -1,0 +1,26 @@
+{
+    "name": "HypixelMonitor",
+    "short": "Monitor Hypixel Forums for mod-related questions",
+    "description": "Monitors Hypixel Forums (SkyBlock sections) for posts asking about Minecraft mods, modpacks, and technical help. Sends notifications to Discord channels when relevant posts are found.",
+    "author": [
+        "Kd_Gaming1"
+    ],
+    "requirements": [
+        "aiohttp",
+        "beautifulsoup4"
+    ],
+    "tags": [
+        "hypixel",
+        "forum",
+        "monitoring",
+        "mods",
+        "modpack",
+        "skyblock",
+        "technical support"
+    ],
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 8, 0],
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

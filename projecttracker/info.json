@@ -5,6 +5,6 @@
     "description": "A Discord bot cog that tracks Modrinth mod/plugin updates and posts them to Discord channels.,",
     "tags": ["modrinth", "minecraft", "updates", "tracking", "mods"],
     "requirements": ["aiohttp"],
-    "min_bot_version": "3.4.0",
+    "min_bot_version": "3.5.0",
     "end_user_data_statement": "This cog stores project tracking configurations and last seen version IDs per guild. No end user data is stored."
 }
