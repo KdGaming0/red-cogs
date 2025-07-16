@@ -19,7 +19,7 @@ class ProjectTracker(commands.Cog):
 
         # Default settings
         default_global = {
-            "check_interval": 900,  # 5 minutes in seconds
+            "check_interval": 900,  # 15 minutes in seconds
             "api_rate_limit": 280,  # Max API calls per minute
         }
 
@@ -262,12 +262,22 @@ class ProjectTracker(commands.Cog):
             for i, page in enumerate(pages):
                 embed = discord.Embed(description=page, color=discord.Color.green())
 
-                # Add role ping only to the first message
+                # Add role pings only to the first message
                 content = None
-                if i == 0 and config.get("ping_role_id"):
-                    role = guild.get_role(config["ping_role_id"])
-                    if role:
-                        content = role.mention
+                if i == 0:
+                    ping_role_ids = config.get("ping_role_ids", [])
+                    # Handle legacy single role format
+                    if config.get("ping_role_id") and config["ping_role_id"] not in ping_role_ids:
+                        ping_role_ids.append(config["ping_role_id"])
+
+                    if ping_role_ids:
+                        role_mentions = []
+                        for role_id in ping_role_ids:
+                            role = guild.get_role(role_id)
+                            if role:
+                                role_mentions.append(role.mention)
+                        if role_mentions:
+                            content = " ".join(role_mentions)
 
                 await channel.send(content=content, embed=embed)
 
@@ -286,45 +296,76 @@ class ProjectTracker(commands.Cog):
             # Save updated configurations
             await guild_config.tracked_projects.set(tracked_projects)
 
+    def _find_tracking_config(self, tracked_projects: Dict, project_id: str, channel_id: int) -> Optional[Dict]:
+        """Find a specific tracking configuration."""
+        if project_id not in tracked_projects:
+            return None
+
+        for config in tracked_projects[project_id]:
+            if config["channel_id"] == channel_id:
+                return config
+        return None
+
     @commands.group(invoke_without_command=True)
     async def track(self, ctx):
         """Project tracking commands."""
         await ctx.send_help(ctx.command)
 
     @track.command(name="add")
-    async def track_add(self, ctx, project_id: str, channel: discord.TextChannel,
-                        role: Optional[discord.Role] = None, *mc_versions: str):
+    async def track_add(self, ctx, project_id: str, channel: discord.TextChannel, *args):
         """
         Track a Modrinth project for updates.
+
+        Usage: `track add <project_id> <channel> [role1] [role2] ... [--mc version1 version2 ...]`
 
         Parameters:
         - project_id: The Modrinth project ID or slug
         - channel: Channel to post updates to
-        - role: Optional role to ping on updates
-        - mc_versions: One or more Minecraft versions to filter (e.g., 1.21.4 1.21.5)
+        - roles: Optional roles to ping on updates (mention them or use role IDs)
+        - --mc: Flag to specify Minecraft versions (e.g., --mc 1.21.4 1.21.5)
         """
+        roles = []
+        mc_versions = []
+
+        # Parse arguments
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--mc":
+                # Everything after --mc are MC versions
+                mc_versions = list(args[i + 1:])
+                break
+            else:
+                # Try to parse as role
+                try:
+                    # Try to get role by mention or ID
+                    role = await commands.RoleConverter().convert(ctx, arg)
+                    roles.append(role)
+                except commands.BadArgument:
+                    await ctx.send(f"❌ Could not find role: {arg}")
+                    return
+            i += 1
+
         # Validate project exists
         project_info = await self.get_project_info(project_id)
         if not project_info:
             await ctx.send(f"❌ Could not find project with ID: {project_id}")
             return
 
-        # Convert mc_versions tuple to list, or use None if empty
-        mc_versions_list = list(mc_versions) if mc_versions else None
+        # Convert to lists
+        mc_versions_list = mc_versions if mc_versions else None
+        role_ids = [role.id for role in roles]
 
         # Get current tracking config
         guild_config = self.config.guild(ctx.guild)
         tracked_projects = await guild_config.tracked_projects()
 
-        # Check if project is already tracked in this channel with same MC versions
-        if project_id in tracked_projects:
-            for config in tracked_projects[project_id]:
-                if (config["channel_id"] == channel.id and
-                        config.get("mc_versions") == mc_versions_list):
-                    versions_str = ", ".join(mc_versions_list) if mc_versions_list else "any"
-                    await ctx.send(
-                        f"❌ Project {project_info['title']} is already tracked in {channel.mention} for MC versions: {versions_str}")
-                    return
+        # Check if project is already tracked in this channel
+        existing_config = self._find_tracking_config(tracked_projects, project_id, channel.id)
+        if existing_config:
+            await ctx.send(
+                f"❌ Project {project_info['title']} is already tracked in {channel.mention}. Use `track edit` to modify the configuration.")
+            return
 
         # Initialize last_version_ids for each MC version
         last_version_ids = {}
@@ -347,7 +388,7 @@ class ProjectTracker(commands.Cog):
         # Create tracking configuration
         track_config = {
             "channel_id": channel.id,
-            "ping_role_id": role.id if role else None,
+            "ping_role_ids": role_ids,
             "mc_versions": mc_versions_list,
             "last_version_ids": last_version_ids,
             "added_by": ctx.author.id,
@@ -367,9 +408,157 @@ class ProjectTracker(commands.Cog):
             version_info = f" (MC versions: {versions_str})"
         else:
             version_info = " (all MC versions)"
-        role_info = f" pinging {role.mention}" if role else ""
+
+        role_info = ""
+        if roles:
+            role_mentions = [role.mention for role in roles]
+            role_info = f" pinging {', '.join(role_mentions)}"
+
         await ctx.send(
             f"✅ Now tracking **{project_info['title']}** ({project_id}){version_info} in {channel.mention}{role_info}")
+
+    @track.command(name="edit")
+    async def track_edit(self, ctx, project_id: str, channel: discord.TextChannel, action: str, *args):
+        """
+        Edit tracking configuration for a project.
+
+        Actions:
+        - `roles add <role1> [role2] ...` - Add roles to ping
+        - `roles remove <role1> [role2] ...` - Remove roles from ping
+        - `roles set <role1> [role2] ...` - Set roles to ping (replaces all)
+        - `roles clear` - Remove all role pings
+        - `mc add <version1> [version2] ...` - Add MC versions to track
+        - `mc remove <version1> [version2] ...` - Remove MC versions from tracking
+        - `mc set <version1> [version2] ...` - Set MC versions to track (replaces all)
+        - `mc clear` - Track all MC versions
+        """
+        guild_config = self.config.guild(ctx.guild)
+        tracked_projects = await guild_config.tracked_projects()
+
+        # Find the tracking configuration
+        config = self._find_tracking_config(tracked_projects, project_id, channel.id)
+        if not config:
+            await ctx.send(f"❌ Project {project_id} is not tracked in {channel.mention}")
+            return
+
+        if action == "roles":
+            if not args:
+                await ctx.send("❌ Please specify a roles action: add, remove, set, or clear")
+                return
+
+            sub_action = args[0]
+            role_args = args[1:]
+
+            # Initialize ping_role_ids if not present (for legacy configs)
+            if "ping_role_ids" not in config:
+                config["ping_role_ids"] = []
+                # Migrate legacy single role
+                if config.get("ping_role_id"):
+                    config["ping_role_ids"].append(config["ping_role_id"])
+                    del config["ping_role_id"]
+
+            if sub_action == "clear":
+                config["ping_role_ids"] = []
+                await ctx.send(f"✅ Cleared all role pings for {project_id} in {channel.mention}")
+
+            elif sub_action in ["add", "remove", "set"]:
+                if not role_args:
+                    await ctx.send(f"❌ Please specify roles to {sub_action}")
+                    return
+
+                roles = []
+                for role_arg in role_args:
+                    try:
+                        role = await commands.RoleConverter().convert(ctx, role_arg)
+                        roles.append(role)
+                    except commands.BadArgument:
+                        await ctx.send(f"❌ Could not find role: {role_arg}")
+                        return
+
+                role_ids = [role.id for role in roles]
+
+                if sub_action == "add":
+                    for role_id in role_ids:
+                        if role_id not in config["ping_role_ids"]:
+                            config["ping_role_ids"].append(role_id)
+                    action_text = "Added"
+                elif sub_action == "remove":
+                    config["ping_role_ids"] = [rid for rid in config["ping_role_ids"] if rid not in role_ids]
+                    action_text = "Removed"
+                elif sub_action == "set":
+                    config["ping_role_ids"] = role_ids
+                    action_text = "Set"
+
+                role_mentions = [role.mention for role in roles]
+                await ctx.send(
+                    f"✅ {action_text} roles for {project_id} in {channel.mention}: {', '.join(role_mentions)}")
+
+            else:
+                await ctx.send("❌ Invalid roles action. Use: add, remove, set, or clear")
+                return
+
+        elif action == "mc":
+            if not args:
+                await ctx.send("❌ Please specify an MC action: add, remove, set, or clear")
+                return
+
+            sub_action = args[0]
+            mc_args = args[1:]
+
+            if sub_action == "clear":
+                # Clear MC versions and reset last_version_ids
+                config["mc_versions"] = None
+                latest_version = await self.get_latest_version(project_id, None)
+                if latest_version:
+                    config["last_version_ids"] = {"all": latest_version.get("id")}
+                await ctx.send(f"✅ Now tracking all MC versions for {project_id} in {channel.mention}")
+
+            elif sub_action in ["add", "remove", "set"]:
+                if not mc_args:
+                    await ctx.send(f"❌ Please specify MC versions to {sub_action}")
+                    return
+
+                current_versions = config.get("mc_versions", []) or []
+
+                if sub_action == "add":
+                    for version in mc_args:
+                        if version not in current_versions:
+                            current_versions.append(version)
+                            # Get initial version for this MC version
+                            latest_version = await self.get_latest_version(project_id, version)
+                            if latest_version:
+                                config["last_version_ids"][version] = latest_version.get("id")
+                    action_text = "Added"
+                elif sub_action == "remove":
+                    current_versions = [v for v in current_versions if v not in mc_args]
+                    # Remove from last_version_ids too
+                    for version in mc_args:
+                        config["last_version_ids"].pop(version, None)
+                    action_text = "Removed"
+                elif sub_action == "set":
+                    current_versions = list(mc_args)
+                    # Reset last_version_ids for new versions
+                    config["last_version_ids"] = {}
+                    for version in current_versions:
+                        latest_version = await self.get_latest_version(project_id, version)
+                        if latest_version:
+                            config["last_version_ids"][version] = latest_version.get("id")
+                    action_text = "Set"
+
+                config["mc_versions"] = current_versions if current_versions else None
+                await ctx.send(
+                    f"✅ {action_text} MC versions for {project_id} in {channel.mention}: {', '.join(mc_args)}")
+
+            else:
+                await ctx.send("❌ Invalid MC action. Use: add, remove, set, or clear")
+                return
+
+        else:
+            await ctx.send("❌ Invalid action. Use 'roles' or 'mc'")
+            return
+
+        # Save changes
+        await guild_config.tracked_projects.set(tracked_projects)
 
     @track.command(name="remove")
     async def track_remove(self, ctx, project_id: str, channel: Optional[discord.TextChannel] = None):
@@ -431,13 +620,22 @@ class ProjectTracker(commands.Cog):
                 channel = ctx.guild.get_channel(config["channel_id"])
                 channel_name = channel.mention if channel else "Unknown Channel"
 
+                # Handle role pings (both old and new format)
                 role_info = ""
-                if config.get("ping_role_id"):
-                    role = ctx.guild.get_role(config["ping_role_id"])
-                    if role:
-                        role_info = f" (pings {role.mention})"
+                ping_role_ids = config.get("ping_role_ids", [])
+                if config.get("ping_role_id") and config["ping_role_id"] not in ping_role_ids:
+                    ping_role_ids.append(config["ping_role_id"])
 
-                # Handle both old and new MC version formats
+                if ping_role_ids:
+                    role_mentions = []
+                    for role_id in ping_role_ids:
+                        role = ctx.guild.get_role(role_id)
+                        if role:
+                            role_mentions.append(role.mention)
+                    if role_mentions:
+                        role_info = f" (pings {', '.join(role_mentions)})"
+
+                # Handle MC versions
                 mc_versions = config.get("mc_versions")
                 if mc_versions:
                     if isinstance(mc_versions, list):
