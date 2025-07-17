@@ -411,6 +411,8 @@ class HypixelMonitor(commands.Cog):
 
         try:
             await channel.send(f"New mod question in {thread['category']}:", embed=embed)
+        except discord.HTTPException as e:
+            log.error(f"Failed to send notification to {channel.id}: {e}")
         except Exception as e:
             log.error(f"Error sending notification: {e}")
 
@@ -511,10 +513,13 @@ class HypixelMonitor(commands.Cog):
         await ctx.send(embed=embed)
 
     @hypixelmonitor.command(name="channel")
-    async def set_channel(self, ctx, channel: discord.TextChannel):
+    async def set_channel(self, ctx, channel: discord.TextChannel = None):
         """Set the notification channel for Hypixel Forums alerts."""
+        if not channel:
+            channel = ctx.channel
+
         await self.config.guild(ctx.guild).channel.set(channel.id)
-        await ctx.send(f"Notification channel set to {channel.mention}")
+        await ctx.send(f"✅ Notification channel set to {channel.mention}")
 
     @hypixelmonitor.command(name="category")
     async def category_manage(self, ctx, action: str, *, category_info: str = None):
@@ -623,22 +628,26 @@ class HypixelMonitor(commands.Cog):
         """Show current monitoring status."""
         config = await self.config.guild(ctx.guild).all()
 
-        embed = discord.Embed(title="Hypixel Forums Monitor Status", color=discord.Color.blue())
+        embed = discord.Embed(
+            title="Hypixel Forums Monitor Status",
+            color=discord.Color.green() if config['enabled'] else discord.Color.red()
+        )
 
         # Basic status
-        embed.add_field(name="Enabled", value="✅ Yes" if config['enabled'] else "❌ No", inline=True)
+        status = "🟢 Enabled" if config['enabled'] else "🔴 Disabled"
+        embed.add_field(name="Status", value=status, inline=True)
 
         # Channel
         channel_id = config['channel']
         if channel_id:
             channel = ctx.guild.get_channel(channel_id)
-            channel_text = channel.mention if channel else "❌ Channel not found"
+            channel_text = f"<#{channel_id}>" if channel else "Not set"
         else:
-            channel_text = "❌ Not set"
+            channel_text = "Not set"
         embed.add_field(name="Channel", value=channel_text, inline=True)
 
         # Check interval
-        embed.add_field(name="Check Interval", value=f"{config['check_interval']} seconds", inline=True)
+        embed.add_field(name="Interval", value=f"{config['check_interval']}s", inline=True)
 
         # Categories
         embed.add_field(name="Forum Categories", value=str(len(config['forum_categories'])), inline=True)
@@ -651,14 +660,14 @@ class HypixelMonitor(commands.Cog):
         embed.add_field(name="Processed Posts", value=str(len(config['processed_posts'])), inline=True)
 
         # Task status
-        task_status = "Running" if ctx.guild.id in self.monitor_tasks else "Not running"
+        task_status = "Running" if ctx.guild.id in self.monitor_tasks else "Stopped"
         embed.add_field(name="Task Status", value=task_status, inline=True)
 
         await ctx.send(embed=embed)
 
     @hypixelmonitor.command(name="toggle")
     async def toggle(self, ctx):
-        """Start or stop Hypixel Forums monitoring."""
+        """Toggle monitoring on/off."""
         config = await self.config.guild(ctx.guild).all()
 
         if config['enabled']:
@@ -667,11 +676,11 @@ class HypixelMonitor(commands.Cog):
             if ctx.guild.id in self.monitor_tasks:
                 self.monitor_tasks[ctx.guild.id].cancel()
                 del self.monitor_tasks[ctx.guild.id]
-            await ctx.send("❌ Hypixel Forums monitoring stopped.")
+            await ctx.send("✅ Monitoring disabled")
         else:
             # Start monitoring
             if not config['channel']:
-                await ctx.send("❌ Please set a notification channel first using `[p]hypixelmonitor channel`")
+                await ctx.send("❌ Please set a notification channel first using `hypixelmonitor channel`")
                 return
 
             await self.config.guild(ctx.guild).enabled.set(True)
@@ -680,7 +689,7 @@ class HypixelMonitor(commands.Cog):
             task = asyncio.create_task(self.monitor_task(ctx.guild.id))
             self.monitor_tasks[ctx.guild.id] = task
 
-            await ctx.send("✅ Hypixel Forums monitoring started.")
+            await ctx.send("✅ Monitoring enabled")
 
     @hypixelmonitor.command(name="check")
     async def manual_check(self, ctx):
@@ -688,7 +697,45 @@ class HypixelMonitor(commands.Cog):
         config = await self.config.guild(ctx.guild).all()
 
         if not config['channel']:
-            await ctx.send("❌ Please set a notification channel first.")
+            await ctx.send("❌ Please set a notification channel first using `hypixelmonitor channel`")
+            return
+
+        await ctx.send("🔍 Checking for new mod questions...")
+        
+        try:
+            await self.monitor_forums(ctx.guild.id)
+            await ctx.send("✅ Manual check completed!")
+        except Exception as e:
+            await ctx.send(f"❌ Error during manual check: {e}")
+            log.error(f"Manual check error for guild {ctx.guild.id}: {e}")
+
+    @hypixelmonitor.command(name="test")
+    async def test_detection(self, ctx, *, post_title: str):
+        """Test the mod detection algorithm on a post title."""
+        is_mod = await self.is_mod_question(post_title, guild_id=ctx.guild.id)
+
+        result = "✅ Would be detected" if is_mod else "❌ Would not be detected"
+        await ctx.send(f"**Test Result:** {result}\n**Title:** {post_title}")
+
+    @hypixelmonitor.command(name="interval")
+    async def set_interval(self, ctx, seconds: int):
+        """Set the check interval in seconds (minimum 60)."""
+        if seconds < 60:
+            await ctx.send("❌ Interval must be at least 60 seconds")
+            return
+
+        await self.config.guild(ctx.guild).check_interval.set(seconds)
+        await ctx.send(f"✅ Check interval set to {seconds} seconds")
+
+    @hypixelmonitor.command(name="threshold")
+    async def set_threshold(self, ctx, threshold: float):
+        """Set the detection threshold (1.0-10.0)."""
+        if not 1.0 <= threshold <= 10.0:
+            await ctx.send("❌ Threshold must be between 1.0 and 10.0")
+            return
+
+        await self.config.guild(ctx.guild).detection_threshold.set(threshold)
+        await ctx.send(f"✅ Detection threshold set to {threshold}")el first.")
             return
 
         async with ctx.typing():

@@ -491,8 +491,8 @@ class RedditMonitor(commands.Cog):
         await ctx.send(f"✅ Notification channel set to {channel.mention}")
 
     @redditmonitor.command(name="toggle")
-    async def toggle_monitoring(self, ctx):
-        """Toggle monitoring on/off"""
+    async def toggle(self, ctx):
+        """Toggle monitoring on/off."""
         guild_config = self.config.guild(ctx.guild)
         enabled = await guild_config.enabled()
 
