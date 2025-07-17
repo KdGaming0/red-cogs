@@ -42,19 +42,65 @@ class HypixelMonitor(commands.Cog):
                 }
             ],
             "primary_keywords": [
-                "mod", "mods", "modpack", "modpacks", "forge", "fabric",
-                "ladymod", "laby", "skytils", "neu", "patcher", "sba",
-                "badlion", "lunar", "essential", "lunarclient", "client", "feather"
+                # Core mod terms
+                "mod", "mods", "modpack", "modpacks", "forge", "fabric", "configs", "config",
+                
+                # 1.21.5 Skyblock Mods
+                "firmament", "skyblock tweaks", "modern warp menu", "skyblockaddons unofficial",
+                "skyhanni", "hypixel mod api", "skyocean", "skyblock profile viewer", "bazaar utils",
+                "skyblocker", "cookies-mod", "aaron's mod", "custom scoreboard", "skycubed",
+                "nofrills", "nobaaddons", "sky cubed", "dulkirmod", "skyblock 21", "skycofl",
+                
+                # 1.8.9 Skyblock Mods
+                "notenoughupdates", "neu", "polysprint", "skyblockaddons", "sba", "polypatcher",
+                "hypixel plus", "furfsky", "dungeons guide", "skyguide", "partly sane skies",
+                "secret routes mod", "skytils",
+                
+                # Performance Mods
+                "more culling", "badoptimizations", "concurrent chunk management", "very many players",
+                "threadtweak", "scalablelux", "particle core", "sodium", "lithium", "iris",
+                "entity culling", "ferritecore", "immediatelyfast",
+                
+                # QoL Mods
+                "scrollable tooltips", "fzzy config", "no chat reports", "no resource pack warnings",
+                "auth me", "betterf3", "scale me", "packcore", "no double sneak", "centered crosshair",
+                "continuity", "3d skin layers", "wavey capes", "sound controller", "cubes without borders",
+                "sodium shadowy path blocks",
+                
+                # Popular Clients/Launchers
+                "ladymod", "laby", "badlion", "lunar", "essential", "lunarclient", "client", "feather",
+            ],
+            "high_priority_keywords": [
+                # Special high-priority keywords that should trigger immediately
+                "skyblock enhanced", "sb enhanced"
             ],
             "secondary_keywords": [
-                "modification", "skyblock addons", "not enough updates",
-                "fps boost", "performance", "lag", "frames", "frame rate",
-                "configs", "settings", "texture pack", "resource pack"
+                # Technical terms
+                "modification", "skyblock addons", "not enough updates", "texture pack", "resource pack",
+                "shader", "shaders", "optifine", "optimization", "optimize",
+                
+                # Performance issues
+                "fps boost", "performance", "lag", "frames", "frame rate", "fps", "stuttering",
+                "freezing", "crash", "crashing", "memory", "ram", "cpu", "gpu", "graphics",
+                "low fps", "bad performance", "slow", "choppy", "frame drops",
+                
+                # PC/Technical problems
+                "pc problem", "computer issue", "technical issue", "troubleshoot", "fix",
+                "error", "bug", "glitch", "not working", "broken", "install", "installation",
+                "setup", "configure", "configuration", "compatibility", "java", "minecraft",
+                
+                # Modding terms
+                "modding", "modded", "forge", "fabric", "loader", "api", "addon", "plugin",
+                "enhancement", "tweak", "utility", "tool", "helper"
             ],
             "negative_keywords": [
-                "minion", "coins", "coin", "dungeon", "f1", "f2", "f3", "f4", "f5", "f6", "f7",
-                "weapon", "armor", "items", "item", "pets", "pet", "talismans", "talisman",
-                "slayer", "dragon", "farm", "mining", "netherstar"
+                # Game content (not technical)
+                "minion", "coins", "coin", "dungeon master", "catacombs", "weapon", "armor", 
+                "items", "item", "pets", "pet", "talismans", "talisman", "accessories",
+                "slayer", "dragon", "farm", "farming", "mining", "netherstar", "auction",
+                "bazaar price", "worth", "sell", "buy", "trade", "trading", "money",
+                "profile", "skills", "skill", "collection", "collections", "recipe",
+                "enchant", "enchanting", "reforge", "gem", "gems", "crystal", "crystals"
             ],
             "detection_threshold": 3.0
         }
@@ -89,25 +135,64 @@ class HypixelMonitor(commands.Cog):
 
     async def is_mod_question(self, title: str, content: str = "", guild_id: int = None) -> bool:
         """
-        Determine if a post is about Minecraft mods using configurable keywords and scoring.
+        Improved detection algorithm for mod/technical questions with better precision.
         """
         if guild_id:
             config = await self.config.guild_from_id(guild_id).all()
         else:
-            # Use default config if no guild specified
             config = await self.config.get_raw()
 
         title_lower = title.lower() if title else ""
         content_lower = content.lower() if content else ""
+        combined_text = f"{title_lower} {content_lower}".strip()
 
         score = 0
+        
+        # HIGH PRIORITY: SB Enhanced / Skyblock Enhanced - immediate match
+        high_priority_keywords = config.get("high_priority_keywords", [])
+        for keyword in high_priority_keywords:
+            if keyword in title_lower or (content_lower and keyword in content_lower):
+                log.info(f"High priority keyword '{keyword}' found in post: {title}")
+                return True
+        
+        # High confidence patterns - immediate match
+        high_confidence_patterns = [
+            r'what\s+mod\s+(?:is|are|do)',
+            r'(?:recommend|suggest)(?:ed)?\s+(?:any|some|good)?\s*(?:mod|mods|modpack)',
+            r'(?:best|good)\s+(?:mod|mods|modpack)\s+for',
+            r'(?:help|issue|problem)\s+(?:with|using)\s+(?:mod|mods)',
+            r'(?:how\s+to\s+(?:install|setup|configure|use))\s+(?:mod|mods)',
+            r'(?:can\'?t\s+get)\s+(?:mod|mods)\s+(?:to\s+work|working)',
+            r'(?:looking\s+for)\s+(?:a\s+)?(?:mod|mods|modpack)',
+            r'(?:need|want)\s+(?:a\s+)?(?:mod|mods|modpack)',
+            r'(?:mod|mods)\s+(?:not\s+)?(?:working|loading)',
+            r'(?:fps|performance)\s+(?:boost|increase|improve)',
+            r'(?:low|bad|poor)\s+(?:fps|performance)',
+            r'(?:lag|stutter|freeze)\s+(?:fix|help|issue)',
+            r'(?:crash|crashing)\s+(?:with|when\s+using)\s+(?:mod|mods)',
+            r'(?:java|minecraft)\s+(?:error|crash|issue)',
+            r'(?:config|configuration)\s+(?:help|issue|problem)',
+            r'(?:texture|resource)\s+pack\s+(?:not\s+working|issue|help)'
+        ]
 
-        # Primary keywords (word boundaries)
+        for pattern in high_confidence_patterns:
+            if re.search(pattern, title_lower):
+                return True
+            if content_lower and re.search(pattern, content_lower):
+                score += 8
+
+        # Primary keywords with context awareness
         primary_keywords = config.get("primary_keywords", [])
         for keyword in primary_keywords:
-            pattern = rf'\b{re.escape(keyword)}\b'
+            # Use word boundaries for most keywords, but handle multi-word ones
+            if ' ' in keyword:
+                pattern = re.escape(keyword)
+            else:
+                pattern = rf'\b{re.escape(keyword)}\b'
+            
             if re.search(pattern, title_lower):
-                score += 3
+                # Higher score if in title
+                score += 4
             if content_lower and re.search(pattern, content_lower):
                 score += 2
 
@@ -119,53 +204,87 @@ class HypixelMonitor(commands.Cog):
             if content_lower and keyword in content_lower:
                 score += 1
 
-        # Question patterns
-        mod_question_patterns = [
-            r'(?:recommend|suggest)(?:ed)?\s+(?:.*?)\s+(?:mod|mods|modpack)',
-            r'(?:what|which|best)\s+(?:.*?)\s+(?:mod|mods|modpack)',
-            r'(?:help|issue|problem)\s+(?:with|using)\s+(?:.*?)\s+(?:mod|mods)',
-            r'(?:how\s+to\s+(?:install|setup|configure|use))\s+(?:.*?)\s+(?:mod|mods)',
-            r'(?:can\'?t\s+get)\s+(?:.*?)\s+(?:mod|mods)\s+(?:to\s+work)',
-            r'(?:looking\s+for)\s+(?:.*?)\s+(?:mod|mods)',
-            r'(?:need|want)\s+(?:.*?)\s+(?:mod|mods)',
-            r'(?:low|bad)\s+(?:fps|frames|performance)',
-            r'performance\s+(?:issue|problem|boost)',
-            r'increase\s+(?:fps|performance)',
-            r'fixing\s+(?:lag|stutter|freeze)'
+        # Technical problem patterns
+        tech_patterns = [
+            r'(?:pc|computer)\s+(?:problem|issue|trouble)',
+            r'(?:technical|tech)\s+(?:issue|problem|help)',
+            r'(?:troubleshoot|fix|solve)',
+            r'(?:not\s+working|broken|error)',
+            r'(?:install|installation)\s+(?:help|issue|problem)',
+            r'(?:setup|configure)\s+(?:help|issue)',
+            r'(?:compatibility|compatible)\s+(?:issue|problem)',
+            r'(?:memory|ram|cpu|gpu)\s+(?:issue|problem|usage)',
+            r'(?:java|jvm)\s+(?:error|issue|problem)'
         ]
 
-        for pattern in mod_question_patterns:
+        for pattern in tech_patterns:
             if re.search(pattern, title_lower):
-                score += 4
-            if content_lower and re.search(pattern, content_lower):
                 score += 3
+            if content_lower and re.search(pattern, content_lower):
+                score += 2
 
-        # Explicit mod question check
-        if re.search(r'what\s+mod\s+is', title_lower) or re.search(r'what\s+mod\s+is', content_lower):
-            return True
+        # Question indicators
+        question_indicators = [
+            r'(?:how\s+(?:do\s+i|to|can\s+i))',
+            r'(?:what\s+(?:is|are|should|can))',
+            r'(?:which\s+(?:mod|mods|one))',
+            r'(?:where\s+(?:can\s+i|do\s+i))',
+            r'(?:why\s+(?:is|are|does|doesn\'?t))',
+            r'(?:can\s+(?:someone|anyone|you))',
+            r'(?:does\s+(?:anyone|somebody))',
+            r'(?:help|assistance|support)',
+            r'\?'  # Question mark
+        ]
 
-        # Negative keywords
+        question_score = 0
+        for pattern in question_indicators:
+            if re.search(pattern, combined_text):
+                question_score += 1
+
+        # Boost score if it's clearly a question
+        if question_score >= 2:
+            score += 2
+
+        # Negative scoring for game content
         negative_score = 0
         negative_keywords = config.get("negative_keywords", [])
+        
+        # Count negative keywords but be less aggressive
+        negative_count = 0
         for keyword in negative_keywords:
             pattern = rf'\b{re.escape(keyword)}\b'
             if re.search(pattern, title_lower):
-                negative_score += 1
+                negative_count += 2  # Title mentions are more significant
             if content_lower and re.search(pattern, content_lower):
-                negative_score += 0.5
+                negative_count += 1
 
-        # False positive patterns
-        false_positive_patterns = [
-            r'sword', r'bow', r'armor', r'helmet', r'chestplate', r'leggings', r'boots',
-            r'hypixel\s+should', r'admins?\s+should', r'staff\s+should'
+        # Only apply negative scoring if there are many game-related terms
+        if negative_count >= 3:
+            negative_score = negative_count * 0.5
+
+        # Strong false positive patterns
+        strong_false_positives = [
+            r'(?:selling|buying|trade|trading)\s+(?:items?|gear|equipment)',
+            r'(?:auction|ah|bazaar)\s+(?:price|flip|profit)',
+            r'(?:dungeon|catacombs)\s+(?:floor|f[0-9]|master)',
+            r'(?:slayer|boss|dragon)\s+(?:fight|kill|strategy)',
+            r'(?:skill|skills)\s+(?:level|xp|experience)',
+            r'(?:collection|recipe|craft|crafting)',
+            r'(?:reforge|enchant|gem|crystal)\s+(?:guide|help)',
+            r'hypixel\s+(?:should|needs?\s+to|staff|admin)',
+            r'(?:suggestion|idea)\s+for\s+hypixel'
         ]
 
-        for pattern in false_positive_patterns:
-            if re.search(pattern, title_lower):
-                negative_score += 1.5
+        for pattern in strong_false_positives:
+            if re.search(pattern, combined_text):
+                negative_score += 3
 
-        final_score = score - (negative_score * 1.5)
+        # Calculate final score
+        final_score = score - negative_score
         threshold = config.get("detection_threshold", 3.0)
+
+        # Debug logging
+        log.debug(f"Post: '{title}' | Score: {score} | Negative: {negative_score} | Final: {final_score} | Threshold: {threshold}")
 
         return final_score >= threshold
 
