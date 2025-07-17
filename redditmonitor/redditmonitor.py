@@ -9,6 +9,8 @@ import pytz
 
 try:
     import praw
+    # Note: PRAW will show a warning about async environments
+    # This is expected and the cog works correctly despite the warning
 except ImportError:
     praw = None
 

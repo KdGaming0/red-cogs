@@ -735,37 +735,50 @@ class HypixelMonitor(commands.Cog):
             return
 
         await self.config.guild(ctx.guild).detection_threshold.set(threshold)
-        await ctx.send(f"✅ Detection threshold set to {threshold}")el first.")
+        await ctx.send(f"✅ Detection threshold set to {threshold}")
+
+    @hypixelmonitor.command(name="check")
+    async def manual_check(self, ctx):
+        """Manually check for new mod questions."""
+        config = await self.config.guild(ctx.guild).all()
+
+        if not config['channel']:
+            await ctx.send("❌ Please set a notification channel first using `hypixelmonitor channel`")
             return
 
-        async with ctx.typing():
+        await ctx.send("🔍 Checking for new mod questions...")
+        
+        try:
             await self.monitor_forums(ctx.guild.id)
+            await ctx.send("✅ Manual check completed!")
+        except Exception as e:
+            await ctx.send(f"❌ Error during manual check: {e}")
+            log.error(f"Manual check error for guild {ctx.guild.id}: {e}")
 
-        await ctx.send("✅ Manual check completed.")
+    @hypixelmonitor.command(name="test")
+    async def test_detection(self, ctx, *, post_title: str):
+        """Test the mod detection algorithm on a post title."""
+        is_mod = await self.is_mod_question(post_title, guild_id=ctx.guild.id)
+
+        result = "✅ Would be detected" if is_mod else "❌ Would not be detected"
+        await ctx.send(f"**Test Result:** {result}\n**Title:** {post_title}")
 
     @hypixelmonitor.command(name="interval")
     async def set_interval(self, ctx, seconds: int):
         """Set the check interval in seconds (minimum 60)."""
         if seconds < 60:
-            await ctx.send("❌ Minimum interval is 60 seconds.")
+            await ctx.send("❌ Interval must be at least 60 seconds")
             return
 
         await self.config.guild(ctx.guild).check_interval.set(seconds)
-
-        # Restart task if running
-        if ctx.guild.id in self.monitor_tasks:
-            self.monitor_tasks[ctx.guild.id].cancel()
-            task = asyncio.create_task(self.monitor_task(ctx.guild.id))
-            self.monitor_tasks[ctx.guild.id] = task
-
-        await ctx.send(f"✅ Check interval set to {seconds} seconds.")
+        await ctx.send(f"✅ Check interval set to {seconds} seconds")
 
     @hypixelmonitor.command(name="threshold")
     async def set_threshold(self, ctx, threshold: float):
-        """Set the detection threshold (default: 3.0)."""
-        if threshold < 0:
-            await ctx.send("❌ Threshold must be positive.")
+        """Set the detection threshold (1.0-10.0)."""
+        if not 1.0 <= threshold <= 10.0:
+            await ctx.send("❌ Threshold must be between 1.0 and 10.0")
             return
 
         await self.config.guild(ctx.guild).detection_threshold.set(threshold)
-        await ctx.send(f"✅ Detection threshold set to {threshold}.")
+        await ctx.send(f"✅ Detection threshold set to {threshold}")
