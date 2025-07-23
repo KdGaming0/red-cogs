@@ -114,6 +114,9 @@ class HypixelMonitor(commands.Cog):
         # User agent for web requests
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
+        # Start monitoring for guilds that have it enabled
+        self.bot.loop.create_task(self.initialize_monitoring())
+
     def cog_unload(self):
         """Clean up when cog is unloaded."""
         # Cancel all monitoring tasks
@@ -123,6 +126,30 @@ class HypixelMonitor(commands.Cog):
         # Close aiohttp session
         if self.session:
             asyncio.create_task(self.session.close())
+
+    async def initialize_monitoring(self):
+        """Initialize monitoring for all guilds that have it enabled"""
+        await self.bot.wait_until_ready()
+
+        for guild in self.bot.guilds:
+            if await self.config.guild(guild).enabled():
+                await self.start_monitoring(guild)
+
+    async def start_monitoring(self, guild):
+        """Start monitoring for a guild"""
+        if guild.id in self.monitor_tasks:
+            return
+
+        task = asyncio.create_task(self.monitor_task(guild.id))
+        self.monitor_tasks[guild.id] = task
+        log.info(f"Started monitoring for guild {guild.id}")
+
+    async def stop_monitoring(self, guild):
+        """Stop monitoring for a guild"""
+        if guild.id in self.monitor_tasks:
+            self.monitor_tasks[guild.id].cancel()
+            del self.monitor_tasks[guild.id]
+            log.info(f"Stopped monitoring for guild {guild.id}")
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -701,9 +728,7 @@ class HypixelMonitor(commands.Cog):
         if config['enabled']:
             # Stop monitoring
             await self.config.guild(ctx.guild).enabled.set(False)
-            if ctx.guild.id in self.monitor_tasks:
-                self.monitor_tasks[ctx.guild.id].cancel()
-                del self.monitor_tasks[ctx.guild.id]
+            await self.stop_monitoring(ctx.guild)
             await ctx.send("✅ Monitoring disabled")
         else:
             # Start monitoring
@@ -712,11 +737,7 @@ class HypixelMonitor(commands.Cog):
                 return
 
             await self.config.guild(ctx.guild).enabled.set(True)
-
-            # Start monitoring task
-            task = asyncio.create_task(self.monitor_task(ctx.guild.id))
-            self.monitor_tasks[ctx.guild.id] = task
-
+            await self.start_monitoring(ctx.guild)
             await ctx.send("✅ Monitoring enabled")
 
     @hypixelmonitor.command(name="check")
