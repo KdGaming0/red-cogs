@@ -406,20 +406,30 @@ class RedditMonitor(commands.Cog):
         guild_config = self.config.guild(guild)
         subreddits = await guild_config.subreddits()
         post_limit = await guild_config.post_limit()
-        processed_posts = set(await guild_config.processed_posts())
 
-        new_processed = []
+        # Get processed posts as list and create set for fast lookup
+        current_processed_list = await guild_config.processed_posts()
+        processed_posts_set = set(str(pid) for pid in current_processed_list)  # Ensure all strings
+
+        newly_processed = []
+
+        log.info(f"Monitoring {len(subreddits)} subreddits with {len(processed_posts_set)} processed posts")
 
         for subreddit_name in subreddits:
             try:
                 subreddit = reddit_client.subreddit(subreddit_name)
+                log.debug(f"Checking r/{subreddit_name} for new posts")
 
                 for post in subreddit.new(limit=post_limit):
-                    if post.id in processed_posts:
+                    post_id = str(post.id)  # Ensure string type
+
+                    # Enhanced logging for debugging
+                    if post_id in processed_posts_set:
+                        log.debug(f"Skipping processed post {post_id}")
                         continue
 
-                    processed_posts.add(post.id)
-                    new_processed.append(post.id)
+                    log.info(f"Found new post {post_id}: '{post.title[:50]}'")
+                    newly_processed.append(post_id)
 
                     if await self.is_mod_question(post, guild):
                         await self.send_notification(guild, post, subreddit_name)
@@ -427,6 +437,19 @@ class RedditMonitor(commands.Cog):
 
             except Exception as e:
                 log.error(f"Error monitoring r/{subreddit_name}: {e}")
+
+        # Save processed posts with proper merging
+        if newly_processed:
+            # Merge and deduplicate
+            all_processed = list(processed_posts_set) + newly_processed
+            all_processed = list(dict.fromkeys(all_processed))  # Remove duplicates, preserve order
+
+            # Keep only last 1000
+            if len(all_processed) > 1000:
+                all_processed = all_processed[-1000:]
+
+            await guild_config.processed_posts.set(all_processed)
+            log.info(f"Updated processed posts: added {len(newly_processed)}, total {len(all_processed)}")
 
         # Save processed posts (keep only last 1000)
         if new_processed:
