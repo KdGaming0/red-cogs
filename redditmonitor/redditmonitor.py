@@ -93,7 +93,12 @@ class RedditMonitor(commands.Cog):
                     
                     # Modding terms
                     "modding", "modded", "forge", "fabric", "loader", "api", "addon", "plugin",
-                    "enhancement", "tweak", "utility", "tool", "helper"
+                    "enhancement", "tweak", "utility", "tool", "helper",
+
+                    "modification", "addon", "plugin", "enhancement", "tweak", "utility", "tool", "helper", "fps boost",
+                    "performance", "lag", "frames", "frame rate", "stuttering", "freezing", "pc problem", "computer issue",
+                    "technical issue", "troubleshoot", "error", "bug", "install", "installation", "setup", "configure",
+                    "compatibility", "java"
                 ],
                 "question_patterns": [
                     r"(?:recommend|suggest)(?:ed)?\s+(?:any|some|good)?\s*(?:mod|mods|modpack)",
@@ -177,8 +182,7 @@ class RedditMonitor(commands.Cog):
 
     async def is_mod_question(self, post, guild: discord.Guild) -> bool:
         """
-        Improved detection using scoring system with updated keywords.
-        Based on the proven old detection algorithm.
+        Improved detection using scoring system with config-based keywords only.
         """
         guild_config = self.config.guild(guild)
         keywords = await guild_config.keywords()
@@ -193,171 +197,59 @@ class RedditMonitor(commands.Cog):
         # Initialize score
         score = 0
 
-        # HIGH PRIORITY: SB Enhanced / Skyblock Enhanced - immediate match
+        # HIGH PRIORITY: Check config-based high priority keywords
         high_priority_keywords = keywords.get("high_priority", [])
         for keyword in high_priority_keywords:
             if keyword in title_lower or (content_lower and keyword in content_lower):
                 log.info(f"High priority keyword '{keyword}' found in post: {title}")
                 return True
 
-        # Check if the post explicitly asks what mod something is from
-        explicit_mod_question = re.search(r'what\s+mod\s+is', title_lower) or re.search(r'what\s+mod\s+is', content_lower)
-        if explicit_mod_question:
-            log.info(f"Explicit mod question detected in post: '{title}'")
-            return True
-
-        # Primary mod keywords with word boundaries (updated list)
-        primary_mod_keywords = [
-            # Core terms
-            r'\bmod\b', r'\bmods\b', r'\bmodpack\b', r'\bmodpacks\b',
-            r'\bforge\b', r'\bfabric\b', r'\bconfigs?\b',
-            
-            # 1.21.5 Skyblock Mods
-            r'\bfirmament\b', r'skyblock tweaks', r'modern warp menu', r'skyblockaddons unofficial',
-            r'\bskyhanni\b', r'hypixel mod api', r'\bskyocean\b', r'skyblock profile viewer', r'bazaar utils',
-            r'\bskyblocker\b', r'cookies-mod', r"aaron's mod", r'custom scoreboard', r'\bskycubed\b',
-            r'\bnofrills\b', r'\bnobaaddons\b', r'sky cubed', r'\bdulkirmod\b', r'skyblock 21', r'\bskycofl\b',
-            
-            # 1.8.9 Skyblock Mods
-            r'\bnotenoughupdates\b', r'\bneu\b', r'\bpolysprint\b', r'\bskyblockaddons\b', r'\bsba\b', 
-            r'\bpolypatcher\b', r'hypixel plus', r'\bfurfsky\b', r'dungeons guide', r'\bskyguide\b', 
-            r'partly sane skies', r'secret routes mod',
-            
-            # Performance Mods
-            r'more culling', r'\bbadoptimizations\b', r'concurrent chunk management', r'very many players',
-            r'\bthreadtweak\b', r'\bscalablelux\b', r'particle core', r'\bsodium\b', r'\blithium\b', r'\biris\b',
-            r'entity culling', r'\bferritecore\b', r'\bimmediatelyfast\b',
-            
-            # QoL Mods
-            r'scrollable tooltips', r'fzzy config', r'no chat reports', r'no resource pack warnings',
-            r'auth me', r'\bbetterf3\b', r'scale me', r'\bpackcore\b', r'no double sneak', r'centered crosshair',
-            r'\bcontinuity\b', r'3d skin layers', r'wavey capes', r'sound controller', r'cubes without borders',
-            r'sodium shadowy path blocks',
-            
-            # Popular Clients/Launchers
-            r'\bladymod\b', r'\blaby\b', r'\bskytils\b', r'\bbadlion\b', r'\blunar\b', 
-            r'\bessential\b', r'\blunarclient\b', r'\bclient\b', r'\bfeather\b'
-        ]
-
-        # Secondary mod keywords (less certain but still relevant)
-        secondary_mod_keywords = [
-            r'modification', r'skyblock addons', r'not enough updates',
-            r'fps boost', r'performance', r'lag', r'frames', r'frame rate',
-            r'configs', r'settings', r'texture pack', r'resource pack',
-            r'shader', r'shaders', r'optifine', r'optimization', r'optimize',
-            r'stuttering', r'freezing', r'crash', r'crashing', r'memory', r'ram', r'cpu', r'gpu',
-            r'low fps', r'bad performance', r'slow', r'choppy', r'frame drops',
-            r'pc problem', r'computer issue', r'technical issue', r'troubleshoot', r'fix',
-            r'error', r'bug', r'glitch', r'not working', r'broken', r'install', r'installation',
-            r'setup', r'configure', r'configuration', r'compatibility', r'java', r'minecraft',
-            r'modding', r'modded', r'loader', r'api', r'addon', r'plugin',
-            r'enhancement', r'tweak', r'utility', r'tool', r'helper'
-        ]
-
-        # Mod question patterns with stronger contextual indicators
-        mod_question_patterns = [
-            r'(?:recommend|suggest)(?:ed)?\s+(?:.*?)\s+(?:mod|mods|modpack)',
-            r'(?:what|which|best)\s+(?:.*?)\s+(?:mod|mods|modpack)',
-            r'(?:help|issue|problem)\s+(?:with|using)\s+(?:.*?)\s+(?:mod|mods)',
-            r'(?:how\s+to\s+(?:install|setup|configure|use))\s+(?:.*?)\s+(?:mod|mods)',
-            r'(?:can\'?t\s+get)\s+(?:.*?)\s+(?:mod|mods)\s+(?:to\s+work)',
-            r'(?:looking\s+for)\s+(?:.*?)\s+(?:mod|mods)',
-            r'(?:need|want)\s+(?:.*?)\s+(?:mod|mods)',
-            r'(?:low|bad)\s+(?:fps|frames|performance)',
-            r'performance\s+(?:issue|problem|boost)',
-            r'increase\s+(?:fps|performance)',
-            r'fixing\s+(?:lag|stutter|freeze)',
-            r'(?:fps|performance)\s+(?:boost|increase|improve)',
-            r'(?:lag|stutter|freeze)\s+(?:fix|help|issue)',
-            r'(?:crash|crashing)\s+(?:with|when\s+using)\s+(?:mod|mods)',
-            r'(?:java|minecraft)\s+(?:error|crash|issue)',
-            r'(?:config|configuration)\s+(?:help|issue|problem)',
-            r'(?:texture|resource)\s+pack\s+(?:not\s+working|issue|help)',
-            r'(?:pc|computer)\s+(?:problem|issue|trouble)',
-            r'(?:technical|tech)\s+(?:issue|problem|help)'
-        ]
-
-        # Negative keywords that suggest the post is NOT about mods
-        negative_keywords = [
-            r'\bminion\b', r'\bcoins?\b', r'\bdungeon\b', r'\bf[0-9]\b',
-            r'\bnetherstar\b', r'\bweapon\b', r'\barmor\b', r'\bitems?\b', 
-            r'\bpets?\b', r'\btalismans?\b', r'\bslayer\b', r'\bdragon\b',
-            r'\bfarm\b', r'\bmining\b', r'\bauction\b', r'\bbazaar\b',
-            r'\bworth\b', r'\bsell\b', r'\bbuy\b', r'\btrade\b', r'\btrading\b',
-            r'\bmoney\b', r'\bprofile\b', r'\bskills?\b', r'\bcollections?\b',
-            r'\brecipe\b', r'\benchant\b', r'\benchanting\b', r'\breforge\b',
-            r'\bgems?\b', r'\bcrystals?\b', r'\bmagic\b', r'\bspell\b', 
-            r'\bmana\b', r'\bintelligence\b'
-        ]
-
-        # Check primary mod keywords in title (highest confidence)
-        for keyword in primary_mod_keywords:
-            if re.search(keyword, title_lower):
-                log.debug(f"Primary keyword match in title: {keyword} in '{title}'")
-                score += 3
-
-        # Check mod question patterns in title
-        for pattern in mod_question_patterns:
-            if re.search(pattern, title_lower):
-                log.debug(f"Question pattern matched in title: {pattern} in '{title}'")
-                score += 4
-
-        # Check secondary keywords in title
-        for keyword in secondary_mod_keywords:
+        # Use config-based primary keywords
+        primary_keywords = keywords.get("primary", [])
+        for keyword in primary_keywords:
             if keyword in title_lower:
-                log.debug(f"Secondary keyword match in title: {keyword} in '{title}'")
+                score += 3
+            if content_lower and keyword in content_lower:
                 score += 2
 
-        # Check patterns in content
-        if content_lower:
-            # Primary keywords in content
-            for keyword in primary_mod_keywords:
-                if re.search(keyword, content_lower):
-                    log.debug(f"Primary keyword match in content: {keyword}")
+        # Use config-based secondary keywords
+        secondary_keywords = keywords.get("secondary", [])
+        for keyword in secondary_keywords:
+            if keyword in title_lower:
+                score += 2
+            if content_lower and keyword in content_lower:
+                score += 1
+
+        # Use config-based question patterns
+        question_patterns = keywords.get("question_patterns", [])
+        for pattern in question_patterns:
+            try:
+                if re.search(pattern, title_lower):
                     score += 2
-
-            # Question patterns in content
-            for pattern in mod_question_patterns:
-                if re.search(pattern, content_lower):
-                    log.debug(f"Question pattern matched in content: {pattern}")
-                    score += 3
-
-            # Secondary keywords in content
-            for keyword in secondary_mod_keywords:
-                if keyword in content_lower:
-                    log.debug(f"Secondary keyword match in content: {keyword}")
+                if content_lower and re.search(pattern, content_lower):
                     score += 1
+            except re.error:
+                log.warning(f"Invalid regex pattern: {pattern}")
+                continue
 
-        # Check for negative keywords that suggest the post is NOT about mods
+        # Check negative keywords from config
+        negative_keywords = keywords.get("negative", [])
         negative_score = 0
         for keyword in negative_keywords:
-            if re.search(keyword, title_lower):
+            if keyword in title_lower:
                 negative_score += 1
-            if content_lower and re.search(keyword, content_lower):
+            if content_lower and keyword in content_lower:
                 negative_score += 0.5
-
-        # Specific pattern checks for false positives
-        common_false_positive_patterns = [
-            r'sword', r'bow', r'armor', r'helmet', r'chestplate', r'leggings', r'boots',
-            r'hypixel\s+should', r'admins?\s+should', r'staff\s+should',
-            r'rank\s+(?:all|the|these)', r'(?:texture|skin)\s+(?:pack|review|showcase)',
-            r'(?:store|payment|purchase|buy)', r'(?:boosting|profile)\s+(?:\?|question)',
-            r'what\s+can\s+be\s+done\s+about', r'(?:campfire|trial|badge|npc)',
-            r'(?:hyperion|valkyrie|astrea|scylla)\s+(?:texture|review|comparison)'
-        ]
-
-        for pattern in common_false_positive_patterns:
-            if re.search(pattern, title_lower):
-                negative_score += 1.5
 
         # Apply negative score to reduce false positives
         final_score = score - (negative_score * 1.5)
 
         # Log the scoring results for debugging
-        log.debug(f"Reddit mod detection scores for '{title}' - Positive: {score}, Negative: {negative_score}, Final: {final_score}")
+        log.debug(
+            f"Reddit mod detection scores for '{title}' - Positive: {score}, Negative: {negative_score}, Final: {final_score}")
 
-        # Return True if the final score exceeds the threshold
-        threshold = 3.0
+        # Get threshold from config
+        threshold = await guild_config.detection_threshold()
         return final_score >= threshold
 
     async def send_notification(self, guild: discord.Guild, post, subreddit_name: str):
