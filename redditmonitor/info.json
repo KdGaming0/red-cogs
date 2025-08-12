@@ -3,8 +3,9 @@
     "short": "Monitor Reddit for mod-related questions and support requests",
     "description": "A comprehensive Reddit monitoring cog that watches specified subreddits for posts asking about mods, modpacks, or PC performance issues. Sends notifications to Discord channels when relevant posts are found.",
     "author": ["Kd_Gaming1"],
+    "install_msg": "Thanks for installing RedditMonitor. Use [p]rmonitor commands to configure.",
     "min_bot_version": "3.5.0",
     "min_python_version": [3, 8, 0],
-    "requirements": ["praw>=7.0.0", "pytz>=2021.1"],
+    "requirements": ["asyncpraw>=7.0.0", "pytz>=2021.1"],
     "tags": ["reddit", "monitoring", "moderation", "hypixel", "skyblock"]
 }
