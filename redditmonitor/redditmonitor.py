@@ -398,7 +398,7 @@ class RedditMonitor(commands.Cog):
 
                         for sub in list(subs):
                             try:
-                                subreddit = reddit.subreddit(sub)
+                                subreddit = await reddit.subreddit(sub)
                                 # iterate new submissions
                                 async for submission in subreddit.new(limit=25):
                                     if await self._is_processed(guild, submission.id):
