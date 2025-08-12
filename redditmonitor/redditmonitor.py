@@ -28,7 +28,7 @@ DEFAULT_KEYWORDS = {
     ],
     "normal": [
         # Core mod terms
-        "mod", "mods", "modpack", "modpacks", "forge", "fabric", "configs", "config",
+        "mod", "mods", "modpack", "modpacks", "forge", "fabric", "configs", "config", "1.21.5", "1.21.8", "1.21",
 
         # 1.21+ Skyblock Mods
         "firmament", "skyblock tweaks", "modern warp menu", "skyblockaddons unofficial",
