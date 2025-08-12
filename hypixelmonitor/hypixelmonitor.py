@@ -1,3 +1,5 @@
+import traceback
+
 import discord
 import aiohttp
 import asyncio
@@ -72,7 +74,7 @@ class HypixelMonitor(commands.Cog):
             ],
             "high_priority_keywords": [
                 # Special high-priority keywords that should trigger immediately
-                "skyblock enhanced", "sb enhanced"
+                "skyblock enhanced", "sb enhanced", "kd_gaming1", "kdgaming1", "kdgaming", "packcore", "scale me", "scaleme"
             ],
             "secondary_keywords": [
                 # Technical terms
@@ -436,109 +438,110 @@ class HypixelMonitor(commands.Cog):
 
         return threads
 
-    async def send_notification(self, thread: Dict[str, str], guild_id: int):
-        """Send a notification about a mod question to the configured channel."""
-        guild = self.bot.get_guild(guild_id)
-        if not guild:
-            return
-
+    async def send_notification(self, guild: discord.Guild, thread_data: dict):
+        """Send notification about a new mod question"""
         channel_id = await self.config.guild(guild).channel()
         if not channel_id:
+            log.warning(f"No notification channel set for guild {guild.id}")
             return
 
-        channel = guild.get_channel(channel_id)
+        channel = self.bot.get_channel(channel_id)
         if not channel:
+            log.error(f"Could not find channel {channel_id} for guild {guild.id}")
             return
 
-        # Create embed
-        embed = discord.Embed(
-            title=thread['title'],
-            url=thread['url'],
-            color=discord.Color.orange(),
-            timestamp=datetime.utcnow()
-        )
-
-        if thread['content']:
-            description = thread['content'][:300] + "..." if len(thread['content']) > 300 else thread['content']
-            embed.description = description
-
-        embed.set_footer(text=f"Posted by {thread['author']} in {thread['category']}")
-
         try:
-            await channel.send(f"New mod question in {thread['category']}:", embed=embed)
+            embed = discord.Embed(
+                title=thread_data['title'],
+                url=thread_data['url'],
+                description=thread_data['content'] if thread_data['content'] else "No content preview available",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+
+            embed.set_footer(text=f"Posted in {thread_data['category']} • Hypixel Forums")
+
+            await channel.send(f"New mod question in **{thread_data['category']}**:", embed=embed)
+
         except discord.HTTPException as e:
-            log.error(f"Failed to send notification to {channel.id}: {e}")
+            log.error(f"Failed to send notification to channel {channel_id}: {e}")
         except Exception as e:
-            log.error(f"Error sending notification: {e}")
+            log.error(f"Unexpected error sending notification: {e}")
 
-    async def monitor_forums(self, guild_id: int):
-        """Monitor forums for mod questions."""
-        guild = self.bot.get_guild(guild_id)
-        if not guild:
-            return
+    async def check_forums(self, guild: discord.Guild):
+        """Check Hypixel forums for new mod questions"""
+        guild_config = self.config.guild(guild)
+        categories = await guild_config.forum_categories()
 
-        config = await self.config.guild(guild).all()
-        if not config['enabled']:
-            return
+        # Get processed posts as list and create set for fast lookup
+        current_processed_list = await guild_config.processed_posts()
+        processed_posts_set = set(str(pid) for pid in current_processed_list)
 
-        try:
-            # Get processed posts
-            processed_posts = set(config['processed_posts'])
+        newly_processed = []
 
-            # Get all threads from all categories
-            all_threads = []
-            for category in config['forum_categories']:
+        log.info(f"Monitoring {len(categories)} forum categories with {len(processed_posts_set)} processed posts")
+
+        for category in categories:
+            try:
                 threads = await self.get_recent_threads(category)
-                all_threads.extend(threads)
 
-            # Process threads
-            for thread in all_threads:
-                if thread['id'] in processed_posts:
-                    continue
+                for thread in threads:
+                    thread_id = str(thread['id'])
 
-                # Add to processed posts
-                processed_posts.add(thread['id'])
+                    if thread_id in processed_posts_set:
+                        log.debug(f"Skipping processed thread {thread_id}")
+                        continue
 
-                # Check if it's a mod question (first check title only)
-                if await self.is_mod_question(thread['title'], guild_id=guild_id):
-                    thread['content'] = await self.get_thread_content(thread['url'])
-                    await self.send_notification(thread, guild_id)
-                else:
-                    # Check with content
-                    thread['content'] = await self.get_thread_content(thread['url'])
-                    if await self.is_mod_question(thread['title'], thread['content'], guild_id=guild_id):
-                        await self.send_notification(thread, guild_id)
+                    log.info(f"Found new thread {thread_id}: '{thread['title'][:50]}'")
+                    newly_processed.append(thread_id)
 
-            # Update processed posts (keep only recent ones)
-            processed_posts_list = list(processed_posts)
-            if len(processed_posts_list) > config['max_processed_posts']:
-                processed_posts_list = processed_posts_list[-config['max_processed_posts']:]
+                    # Check if it's a mod question
+                    if await self.is_mod_question(thread['title'], thread.get('content', ''), guild.id):
+                        await self.send_notification(guild, thread)
+                        log.info(f"Sent notification for thread: {thread['title']}")
 
-            await self.config.guild(guild).processed_posts.set(processed_posts_list)
+            except Exception as e:
+                log.error(f"Error checking category {category.get('name', 'Unknown')}: {e}")
+                continue
 
-        except Exception as e:
-            log.error(f"Error monitoring forums for guild {guild_id}: {e}")
+        # Save processed posts with proper merging
+        if newly_processed:
+            # Merge and deduplicate
+            all_processed = list(processed_posts_set) + newly_processed
+            all_processed = list(dict.fromkeys(all_processed))  # Remove duplicates, preserve order
+
+            # Keep only last max_processed_posts
+            max_posts = await guild_config.max_processed_posts()
+            if len(all_processed) > max_posts:
+                all_processed = all_processed[-max_posts:]
+
+            await guild_config.processed_posts.set(all_processed)
+            log.info(f"Updated processed posts: added {len(newly_processed)}, total {len(all_processed)}")
 
     async def monitor_task(self, guild_id: int):
-        """Background task for monitoring forums."""
+        """Main monitoring task for a guild"""
         while True:
             try:
                 guild = self.bot.get_guild(guild_id)
                 if not guild:
                     break
 
-                config = await self.config.guild(guild).all()
-                if not config['enabled']:
+                guild_config = self.config.guild(guild)
+                if not await guild_config.enabled():
                     break
 
-                await self.monitor_forums(guild_id)
-                await asyncio.sleep(config['check_interval'])
+                await self.check_forums(guild)  # This method needs to exist
+
+                interval = await guild_config.check_interval()
+                await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
+                log.info(f"Monitoring task cancelled for guild {guild_id}")
                 break
             except Exception as e:
-                log.error(f"Error in monitor task for guild {guild_id}: {e}")
-                await asyncio.sleep(60)  # Wait a minute before retrying
+                log.error(f"Error in monitoring loop for guild {guild_id}: {e}")
+                log.error(f"Traceback: {traceback.format_exc()}")
+                await asyncio.sleep(60)  # Wait before retrying
 
     @commands.group(name="hypixelmonitor", aliases=["hm"])
     @commands.guild_only()

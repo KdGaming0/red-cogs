@@ -6,13 +6,7 @@ import traceback
 from datetime import datetime
 from typing import Optional, Dict, List, Set
 import pytz
-
-try:
-    import praw
-    # Note: PRAW will show a warning about async environments
-    # This is expected and the cog works correctly despite the warning
-except ImportError:
-    praw = None
+import asyncpraw
 
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
@@ -61,7 +55,7 @@ class RedditMonitor(commands.Cog):
                     # 1.8.9 Skyblock Mods
                     "notenoughupdates", "neu", "polysprint", "skyblockaddons", "sba", "polypatcher",
                     "hypixel plus", "furfsky", "dungeons guide", "skyguide", "partly sane skies",
-                    "secret routes mod",
+                    "secret routes mod", "skytils",
                     
                     # Performance Mods
                     "more culling", "badoptimizations", "concurrent chunk management", "very many players",
@@ -75,14 +69,12 @@ class RedditMonitor(commands.Cog):
                     "sodium shadowy path blocks",
                     
                     # Popular Clients/Launchers
-                    "ladymod", "laby", "badlion", "lunar", "essential", "lunarclient", "client", "feather",
-                    
-                    # Enhanced versions
-                    "skytils"
+                    "ladymod", "laby", "badlion", "lunar", "essential", "lunarclient", "client", "feather"
+
                 ],
                 "high_priority": [
                     # Special high-priority keywords that should trigger immediately
-                    "skyblock enhanced", "sb enhanced"
+                    "skyblock enhanced", "sb enhanced", "kd_gaming1", "kdgaming1", "kdgaming", "packcore", "scale me", "scaleme"
                 ],
                 "secondary": [
                     # Technical terms
@@ -138,7 +130,7 @@ class RedditMonitor(commands.Cog):
         self.config.register_guild(**default_guild)
 
         # Reddit client instances per guild
-        self.reddit_clients: Dict[int, praw.Reddit] = {}
+        self.reddit_clients: Dict[int, asyncpraw.Reddit] = {}
 
         # Task management
         self.monitor_tasks: Dict[int, asyncio.Task] = {}
@@ -159,9 +151,9 @@ class RedditMonitor(commands.Cog):
             if await self.config.guild(guild).enabled():
                 await self.start_monitoring(guild)
 
-    async def create_reddit_client(self, guild: discord.Guild) -> Optional[praw.Reddit]:
+    async def create_reddit_client(self, guild: discord.Guild) -> Optional[asyncpraw.Reddit]:
         """Create a Reddit client for a guild"""
-        if not praw:
+        if not asyncpraw:
             log.error("praw library not installed")
             return None
 
@@ -173,7 +165,7 @@ class RedditMonitor(commands.Cog):
             return None
 
         try:
-            reddit_client = praw.Reddit(
+            reddit_client = asyncpraw.Reddit(
                 client_id=credentials["client_id"],
                 client_secret=credentials["client_secret"],
                 user_agent=credentials["user_agent"]
@@ -451,13 +443,6 @@ class RedditMonitor(commands.Cog):
             await guild_config.processed_posts.set(all_processed)
             log.info(f"Updated processed posts: added {len(newly_processed)}, total {len(all_processed)}")
 
-        # Save processed posts (keep only last 1000)
-        if new_processed:
-            all_processed = list(processed_posts)
-            if len(all_processed) > 1000:
-                all_processed = all_processed[-1000:]
-            await guild_config.processed_posts.set(all_processed)
-
     async def monitoring_loop(self, guild: discord.Guild):
         """Main monitoring loop for a guild"""
         while True:
@@ -502,7 +487,7 @@ class RedditMonitor(commands.Cog):
     @redditmonitor.command(name="setup")
     async def setup_credentials(self, ctx, client_id: str, client_secret: str, user_agent: str = None):
         """Set up Reddit API credentials"""
-        if not praw:
+        if not asyncpraw:
             await ctx.send("❌ The `praw` library is not installed. Please install it to use this cog.")
             return
 
@@ -517,7 +502,7 @@ class RedditMonitor(commands.Cog):
 
         # Test the credentials
         try:
-            reddit_client = praw.Reddit(
+            reddit_client = asyncpraw.Reddit(
                 client_id=client_id,
                 client_secret=client_secret,
                 user_agent=user_agent
