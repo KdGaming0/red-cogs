@@ -1,6 +1,7 @@
 import asyncio
 import re
 import logging
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -482,7 +483,7 @@ class RedditMonitor(commands.Cog):
     async def quicksetup(self, ctx: commands.Context, channel: discord.TextChannel):
         """Quick setup: set channel and load default keywords."""
         await self.config.guild(ctx.guild).notify_channel_id.set(channel.id)
-        await self.config.guild(ctx.guild).keywords.set(DEFAULT_KEYWORDS.copy())
+        await self.config.guild(ctx.guild).keywords.set(deepcopy(DEFAULT_KEYWORDS))
 
         await ctx.send(f"✅ Quick setup complete!\n"
                        f"📢 Notification channel: {channel.mention}\n"
