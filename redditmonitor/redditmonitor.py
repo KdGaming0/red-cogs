@@ -117,6 +117,7 @@ class RedditMonitor(commands.Cog):
             "processed_ids": [],
             "max_processed": DEFAULT_MAX_PROCESSED,
             "timezone": None,
+            "default_debug": False,
         }
 
         self.config.register_guild(**default_guild)
@@ -397,15 +398,15 @@ class RedditMonitor(commands.Cog):
                         threshold = await self.config.guild(guild).threshold()
                         flair_filter = await self.config.guild(guild).flair_filter()
 
+                        found_match = False  # <-- Add this line
+
                         for sub in list(subs):
                             try:
                                 subreddit = await reddit.subreddit(sub)
-                                # iterate new submissions
                                 async for submission in subreddit.new(limit=25):
                                     if await self._is_processed(guild, submission.id):
                                         continue
 
-                                    # optional flair filtering (None means allow all)
                                     if flair_filter:
                                         flair = getattr(submission, "link_flair_text", None)
                                         if not flair or flair_filter.lower() not in str(flair).lower():
@@ -422,18 +423,27 @@ class RedditMonitor(commands.Cog):
                                     elif detect["score"] >= threshold:
                                         detected = True
 
-                                    # negative rule: if many negative matches make it not show
                                     if detect["matches"]["negative"]:
-                                        if len(detect["matches"]["negative"]) > len(detect["matches"]["normal"]) + len(detect["matches"]["lower"]):
+                                        if len(detect["matches"]["negative"]) > len(detect["matches"]["normal"]) + len(
+                                                detect["matches"]["lower"]):
                                             detected = False
 
                                     if detected:
+                                        found_match = True  # <-- Set to True if match found
                                         await self._notify(guild, submission, detect)
 
                                     await self._add_processed(guild, submission.id)
 
                             except Exception:
                                 LOGGER.exception("Error processing subreddit %s for guild %s", sub, guild.id)
+
+                        # Send debug message if no matches found and debug mode is enabled
+                        debug_enabled = await self.config.guild(guild).default_debug()
+                        if not found_match and debug_enabled:
+                            channel_id = await self.config.guild(guild).notify_channel_id()
+                            channel = guild.get_channel(channel_id) if channel_id else None
+                            if channel:
+                                await channel.send("✅ Reddit monitor is alive. No matching posts found this cycle.")
 
                     interval = await self.config.guild(guild).interval()
                     if not isinstance(interval, int) or interval < MIN_INTERVAL:
@@ -444,13 +454,11 @@ class RedditMonitor(commands.Cog):
                     raise
                 except Exception:
                     LOGGER.exception("Unhandled error in monitoring loop for guild %s", guild.id)
-                    # sleep before retrying to avoid hot loop when exceptions occur
                     await asyncio.sleep(60)
 
         except asyncio.CancelledError:
             LOGGER.info("Monitor task cancelled for guild %s", guild.id)
         finally:
-            # cleanup reddit client
             try:
                 rc = self._reddit_clients.pop(guild.id, None)
                 if rc:
@@ -550,6 +558,10 @@ class RedditMonitor(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def enable(self, ctx: commands.Context):
         """Enable monitoring for this guild."""
+        enabled = await self.config.guild(ctx.guild).enabled()
+        if enabled:
+            await ctx.send("Monitoring is already enabled. Use `!rmonitor disable` to turn off.")
+            return
         await self.config.guild(ctx.guild).enabled.set(True)
         await ctx.send("Monitoring enabled for this guild.")
         await self._ensure_task(ctx.guild)
@@ -741,6 +753,13 @@ class RedditMonitor(commands.Cog):
         for lvl, vals in detect["matches"].items():
             lines.append(f"  {lvl}: {', '.join(vals) if vals else 'None'}")
         await ctx.send("\n".join(lines))
+
+    @rmonitor.command(name="debugmode")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def debugmode(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable debug mode (sends 'alive' messages when no matches found)."""
+        await self.config.guild(ctx.guild).default_debug.set(enabled)
+        await ctx.send(f"Debug mode set to: {enabled}")
 
     @rmonitor.command(name="tune")
     @commands.admin_or_permissions(manage_guild=True)
