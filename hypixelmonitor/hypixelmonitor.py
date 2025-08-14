@@ -1,227 +1,425 @@
-import traceback
-
-import discord
-import aiohttp
 import asyncio
 import re
-import json
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 from urllib.parse import urljoin
+
+import aiohttp
 from bs4 import BeautifulSoup
+from redbot.core import commands, Config
+from redbot.core.utils.chat_formatting import pagify
+import discord
 
-from redbot.core import commands, Config, checks
-from redbot.core.bot import Red
-from redbot.core.utils.chat_formatting import box, pagify
-from redbot.core.utils.predicates import MessagePredicate
+LOGGER = logging.getLogger("red.hypixelmonitor")
 
-log = logging.getLogger("red.hypixelmonitor")
+# Unique identifier for Config.get_conf. Change if you fork the cog.
+CONF_ID = 0x5b4c3d2e
+
+# Default limits
+MIN_INTERVAL = 60
+DEFAULT_INTERVAL = 900
+DEFAULT_THRESHOLD = 3.0
+DEFAULT_MAX_PROCESSED = 1000
+
+DEFAULT_KEYWORDS = {
+    "higher": [
+        # Special high-priority keywords that should trigger immediately
+        "skyblock enhanced", "sb enhanced", "kd_gaming1", "kdgaming1", "kdgaming", "packcore", "scale me", "scaleme"
+    ],
+    "normal": [
+        # Core mod terms
+        "mod", "mods", "modpack", "modpacks", "forge", "fabric", "configs", "config", "1.21.5", "1.21.8",
+
+        # 1.21+ Skyblock Mods
+        "firmament", "skyblock tweaks", "modern warp menu", "skyblockaddons unofficial",
+        "skyhanni", "hypixel mod api", "skyocean", "skyblock profile viewer", "bazaar utils",
+        "skyblocker", "cookies-mod", "aaron's mod", "custom scoreboard", "skycubed",
+        "nofrills", "nobaaddons", "sky cubed", "dulkirmod", "skyblock 21", "skycofl",
+
+        # 1.8.9 Skyblock Mods
+        "notenoughupdates", "neu", "polysprint", "skyblockaddons", "sba", "polypatcher",
+        "hypixel plus", "furfsky", "dungeons guide", "skyguide", "partly sane skies",
+        "secret routes mod", "skytils",
+
+        # Performance Mods
+        "more culling", "badoptimizations", "concurrent chunk management", "very many players",
+        "threadtweak", "scalablelux", "particle core", "sodium", "lithium", "iris",
+        "entity culling", "ferritecore", "immediatelyfast",
+
+        # QoL Mods
+        "scrollable tooltips", "fzzy config", "no chat reports", "no resource pack warnings",
+        "auth me", "betterf3", "scale me", "packcore", "no double sneak", "centered crosshair",
+        "continuity", "3d skin layers", "wavey capes", "sound controller", "cubes without borders",
+        "sodium shadowy path blocks",
+
+        # Popular Clients/Launchers
+        "ladymod", "laby", "badlion", "lunar", "essential", "lunarclient", "client", "feather",
+
+        # Performance issues
+        "fps boost", "performance", "lag", "frames", "frame rate", "fps", "stuttering",
+        "freezing", "crash", "crashing", "memory", "ram", "cpu", "gpu", "graphics",
+        "low fps", "bad performance", "slow", "choppy", "frame drops",
+
+        # PC/Technical problems
+        "pc problem", "computer issue", "technical issue", "troubleshoot", "fix",
+        "error", "bug", "glitch", "not working", "broken", "install", "installation",
+        "setup", "configure", "configuration", "compatibility", "java", "minecraft", "windows", "linux",
+
+        # Installation/setup
+        "install mod", "mod installation", "how to install", "mod setup"
+    ],
+    "lower": [
+        # Technical terms
+        "modification", "skyblock addons", "not enough updates", "texture pack", "resource pack",
+        "shader", "shaders", "optifine", "optimization", "optimize",
+
+        # Modding terms
+        "modding", "modded", "loader", "api", "addon", "plugin",
+        "enhancement", "tweak", "utility", "tool", "helper"
+    ],
+    "negative": [
+        # Strong game content indicators
+        "minion", "coins", "dungeon master", "catacombs", "slayer", "dragon",
+        "auction house", "bazaar", "trading", "selling", "buying", "worth",
+        "price", "collection", "skill", "enchanting", "reforge", "talisman",
+        "accessory", "weapon", "armor", "pet", "farming coins", "money making"
+    ]
+}
+
+DEFAULT_FORUM_CATEGORIES = [
+    {
+        "url": "https://hypixel.net/forums/skyblock.157/",
+        "name": "SkyBlock General"
+    },
+    {
+        "url": "https://hypixel.net/forums/skyblock-community-help.196/",
+        "name": "SkyBlock Community Help"
+    }
+]
 
 
 class HypixelMonitor(commands.Cog):
-    """Monitor Hypixel Forums for mod-related questions and technical help requests."""
+    """Monitor Hypixel Forums for mod-related questions and technical help requests.
 
-    def __init__(self, bot: Red):
+    Detection uses keyword lists divided into higher (immediate), normal, lower, and negative.
+    """
+
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
+        self.config = Config.get_conf(self, identifier=CONF_ID, force_registration=True)
 
-        # Default configuration
+        # Guild defaults
         default_guild = {
             "enabled": False,
-            "channel": None,
-            "check_interval": 300,  # 5 minutes in seconds
-            "processed_posts": [],
-            "max_processed_posts": 1000,
-            "forum_categories": [
-                {
-                    "url": "https://hypixel.net/forums/skyblock.157/",
-                    "name": "SkyBlock General"
-                },
-                {
-                    "url": "https://hypixel.net/forums/skyblock-community-help.196/",
-                    "name": "SkyBlock Community Help"
-                }
-            ],
-            "primary_keywords": [
-                # Core mod terms
-                "mod", "mods", "modpack", "modpacks", "forge", "fabric", "configs", "config",
-                
-                # 1.21.5 Skyblock Mods
-                "firmament", "skyblock tweaks", "modern warp menu", "skyblockaddons unofficial",
-                "skyhanni", "hypixel mod api", "skyocean", "skyblock profile viewer", "bazaar utils",
-                "skyblocker", "cookies-mod", "aaron's mod", "custom scoreboard", "skycubed",
-                "nofrills", "nobaaddons", "sky cubed", "dulkirmod", "skyblock 21", "skycofl",
-                
-                # 1.8.9 Skyblock Mods
-                "notenoughupdates", "neu", "polysprint", "skyblockaddons", "sba", "polypatcher",
-                "hypixel plus", "furfsky", "dungeons guide", "skyguide", "partly sane skies",
-                "secret routes mod", "skytils",
-                
-                # Performance Mods
-                "more culling", "badoptimizations", "concurrent chunk management", "very many players",
-                "threadtweak", "scalablelux", "particle core", "sodium", "lithium", "iris",
-                "entity culling", "ferritecore", "immediatelyfast",
-                
-                # QoL Mods
-                "scrollable tooltips", "fzzy config", "no chat reports", "no resource pack warnings",
-                "auth me", "betterf3", "scale me", "packcore", "no double sneak", "centered crosshair",
-                "continuity", "3d skin layers", "wavey capes", "sound controller", "cubes without borders",
-                "sodium shadowy path blocks",
-                
-                # Popular Clients/Launchers
-                "ladymod", "laby", "badlion", "lunar", "essential", "lunarclient", "client", "feather",
-            ],
-            "high_priority_keywords": [
-                # Special high-priority keywords that should trigger immediately
-                "skyblock enhanced", "sb enhanced", "kd_gaming1", "kdgaming1", "kdgaming", "packcore", "scale me", "scaleme"
-            ],
-            "secondary_keywords": [
-                # Technical terms
-                "modification", "skyblock addons", "not enough updates", "texture pack", "resource pack",
-                "shader", "shaders", "optifine", "optimization", "optimize",
-                
-                # Performance issues
-                "fps boost", "performance", "lag", "frames", "frame rate", "fps", "stuttering",
-                "freezing", "crash", "crashing", "memory", "ram", "cpu", "gpu", "graphics",
-                "low fps", "bad performance", "slow", "choppy", "frame drops",
-                
-                # PC/Technical problems
-                "pc problem", "computer issue", "technical issue", "troubleshoot", "fix",
-                "error", "bug", "glitch", "not working", "broken", "install", "installation",
-                "setup", "configure", "configuration", "compatibility", "java", "minecraft",
-                
-                # Modding terms
-                "modding", "modded", "forge", "fabric", "loader", "api", "addon", "plugin",
-                "enhancement", "tweak", "utility", "tool", "helper",
-
-                "modification", "addon", "plugin", "enhancement", "tweak", "utility", "tool", "helper",
-                "fps boost", "performance", "lag", "frames", "frame rate", "fps", "stuttering",
-                "freezing", "crash", "crashing", "memory", "ram", "cpu", "gpu", "graphics",
-                "pc problem", "computer issue", "technical issue", "troubleshoot", "fix",
-                "error", "bug", "glitch", "not working", "broken", "install", "installation",
-                "setup", "configure", "configuration", "compatibility", "java", "minecraft"
-            ],
-            "negative_keywords": [
-                # Game content (not technical)
-                "minion", "coins", "coin", "dungeon master", "catacombs", "weapon", "armor", 
-                "items", "item", "pets", "pet", "talismans", "talisman", "accessories",
-                "slayer", "dragon", "farm", "farming", "mining", "netherstar", "auction",
-                "bazaar price", "worth", "sell", "buy", "trade", "trading", "money",
-                "profile", "skills", "skill", "collection", "collections", "recipe",
-                "enchant", "enchanting", "reforge", "gem", "gems", "crystal", "crystals"
-            ],
-            "detection_threshold": 3.0
+            "notify_channel_id": None,
+            "forum_categories": DEFAULT_FORUM_CATEGORIES,
+            "interval": DEFAULT_INTERVAL,
+            "threshold": DEFAULT_THRESHOLD,
+            "keywords": {
+                "higher": [],
+                "normal": [],
+                "lower": [],
+                "negative": [],
+            },
+            "processed_ids": [],
+            "max_processed": DEFAULT_MAX_PROCESSED,
+            "default_debug": False,
         }
 
         self.config.register_guild(**default_guild)
 
-        # Task management
-        self.monitor_tasks: Dict[int, asyncio.Task] = {}
-        self.session: Optional[aiohttp.ClientSession] = None
+        # runtime state - improved task management
+        self._tasks: Dict[int, asyncio.Task] = {}  # guild_id -> task
+        self._sessions: Dict[int, aiohttp.ClientSession] = {}  # guild_id -> session
+        self._task_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> lock for task creation
+        self._global_lock = asyncio.Lock()
 
         # User agent for web requests
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
-        # Start monitoring for guilds that have it enabled
-        self.bot.loop.create_task(self.initialize_monitoring())
+    async def cog_load(self) -> None:
+        """Start monitoring tasks for all enabled guilds when the cog loads."""
+        await self._startup_tasks()
 
-    def cog_unload(self):
-        """Clean up when cog is unloaded."""
+    async def _startup_tasks(self):
+        """Start monitoring tasks for all guilds that have monitoring enabled."""
+        try:
+            all_guilds = await self.config.all_guilds()
+            for guild_id, guild_config in all_guilds.items():
+                if guild_config.get("enabled", False):
+                    guild = self.bot.get_guild(guild_id)
+                    if guild:
+                        await self._ensure_task(guild)
+                        LOGGER.info("Started monitoring task for guild %s on cog load", guild_id)
+        except Exception:
+            LOGGER.exception("Error during startup task creation")
+
+    async def cog_unload(self) -> None:
+        """Clean shutdown of all monitoring tasks."""
+        LOGGER.info("Shutting down HypixelMonitor cog...")
+
         # Cancel all monitoring tasks
-        for task in self.monitor_tasks.values():
-            task.cancel()
+        tasks_to_cancel = list(self._tasks.values())
+        for task in tasks_to_cancel:
+            if not task.cancelled():
+                task.cancel()
 
-        # Close aiohttp session
-        if self.session:
-            asyncio.create_task(self.session.close())
+        # Wait for tasks to finish cancelling
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
-    async def initialize_monitoring(self):
-        """Initialize monitoring for all guilds that have it enabled"""
-        await self.bot.wait_until_ready()
+        self._tasks.clear()
 
-        for guild in self.bot.guilds:
-            if await self.config.guild(guild).enabled():
-                await self.start_monitoring(guild)
+        # Cleanup aiohttp sessions
+        sessions_to_close = list(self._sessions.values())
+        for session in sessions_to_close:
+            try:
+                await session.close()
+            except Exception:
+                LOGGER.exception("Error closing aiohttp session")
 
-    async def start_monitoring(self, guild):
-        """Start monitoring for a guild"""
-        if guild.id in self.monitor_tasks:
-            return
+        self._sessions.clear()
+        self._task_locks.clear()
+        LOGGER.info("HypixelMonitor cog shutdown complete")
 
-        task = asyncio.create_task(self.monitor_task(guild.id))
-        self.monitor_tasks[guild.id] = task
-        log.info(f"Started monitoring for guild {guild.id}")
+    # ------------------------- Helpers -------------------------
+    async def _get_session(self, guild: discord.Guild) -> aiohttp.ClientSession:
+        """Get or create an aiohttp session for the guild."""
+        if guild.id in self._sessions and not self._sessions[guild.id].closed:
+            return self._sessions[guild.id]
 
-    async def stop_monitoring(self, guild):
-        """Stop monitoring for a guild"""
-        if guild.id in self.monitor_tasks:
-            self.monitor_tasks[guild.id].cancel()
-            del self.monitor_tasks[guild.id]
-            log.info(f"Stopped monitoring for guild {guild.id}")
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(
+        try:
+            session = aiohttp.ClientSession(
                 headers={"User-Agent": self.user_agent},
                 timeout=aiohttp.ClientTimeout(total=30)
             )
-        return self.session
+            self._sessions[guild.id] = session
+            return session
+        except Exception as e:
+            LOGGER.exception("Failed to create aiohttp session: %s", e)
+            raise
 
-    async def is_mod_question(self, title: str, content: str = "", guild_id: int = None) -> bool:
-        """Improved detection using scoring system with config-based keywords only."""
-        if guild_id:
-            config = await self.config.guild_from_id(guild_id).all()
+    def _match_score(self, title: str, body: str, keywords: dict) -> Dict:
+        """Enhanced detection with context scoring and phrase matching."""
+        score = 0.0
+        matches = {"higher": [], "normal": [], "lower": [], "negative": []}
+
+        # Preprocess text
+        title_lower = title.lower()
+        body_lower = body.lower()
+        combined_text = f"{title_lower}\n{body_lower}"
+
+        # Context indicators that boost confidence
+        tech_context_patterns = [
+            r'\b(help|issue|problem|error|crash|fix|install|setup|configure)\b',
+            r'\b(not working|broken|won\'t work|can\'t get|having trouble)\b',
+            r'\b(fps|performance|lag|optimization|memory|ram)\b'
+        ]
+
+        context_boost = 0
+        for pattern in tech_context_patterns:
+            if re.search(pattern, combined_text):
+                context_boost += 0.5
+
+        # Enhanced matching with phrase detection
+        for level in ["higher", "normal", "lower", "negative"]:
+            level_keywords = keywords.get(level, [])
+
+            for keyword in level_keywords:
+                keyword_lower = keyword.lower()
+
+                # Exact phrase matching for multi-word keywords
+                if ' ' in keyword_lower:
+                    if keyword_lower in combined_text:
+                        matches[level].append(keyword)
+                        if level == "normal":
+                            score += 3.0  # Higher score for exact phrases
+                        elif level == "lower":
+                            score += 1.5
+                        elif level == "negative":
+                            score -= 2.5
+                else:
+                    # Word boundary matching for single words
+                    pattern = rf'\b{re.escape(keyword_lower)}\b'
+                    if re.search(pattern, combined_text):
+                        matches[level].append(keyword)
+                        if level == "normal":
+                            score += 2.0
+                        elif level == "lower":
+                            score += 1.0
+                        elif level == "negative":
+                            score -= 2.0
+
+        # Apply context boost only if we have positive matches
+        if matches["normal"] or matches["lower"]:
+            score += context_boost
+
+        # Title vs body weight (title matches are more important)
+        title_matches = sum(len(matches[lvl]) for lvl in ["normal", "lower"]
+                            if any(kw.lower() in title_lower for kw in matches[lvl]))
+        if title_matches > 0:
+            score += 1.0  # Bonus for title matches
+
+        return {
+            "immediate": bool(matches["higher"]),
+            "score": score,
+            "matches": matches,
+            "context_boost": context_boost
+        }
+
+    async def _should_notify(self, thread_data: dict, detect_info: dict,
+                             guild: discord.Guild) -> bool:
+        """Advanced filtering to reduce false positives."""
+
+        # Always notify for immediate matches
+        if detect_info["immediate"]:
+            return True
+
+        # Check basic score threshold
+        threshold = await self.config.guild(guild).threshold()
+        if detect_info["score"] < threshold:
+            return False
+
+        # Additional filters
+        title = thread_data.get('title', '').lower()
+        body = thread_data.get('content', '').lower()
+
+        # Skip if too many negative indicators
+        negative_count = len(detect_info["matches"]["negative"])
+        positive_count = len(detect_info["matches"]["normal"]) + len(detect_info["matches"]["lower"])
+
+        if negative_count >= positive_count and negative_count > 2:
+            return False
+
+        # Skip common false positive patterns
+        false_positive_patterns = [
+            r'\b(selling|buying|trade|auction|price check|worth)\b',
+            r'\b(looking for|want to buy|WTB|WTS)\b',
+            r'\b(collection|skill|level|exp|xp)\b.*\b(boost|farm)\b',
+            r'\b(what.*worth|how much|value)\b'
+        ]
+
+        combined = f"{title} {body}"
+        for pattern in false_positive_patterns:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return False
+
+        # Require stronger signals for borderline scores
+        if detect_info["score"] < threshold + 1.0:
+            # Need at least one strong keyword or good context
+            if not detect_info["matches"]["normal"] and detect_info.get("context_boost", 0) < 1.0:
+                return False
+
+        return True
+
+    async def _notify(self, guild: discord.Guild, thread_data: dict, detect_info: dict):
+        """Enhanced notification with confidence indicators."""
+        channel_id = await self.config.guild(guild).notify_channel_id()
+        if not channel_id:
+            return
+
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            return
+
+        title = thread_data.get('title', 'Unknown Title')
+        url = thread_data.get('url', '')
+        author = thread_data.get('author', 'Unknown')
+        category = thread_data.get('category', 'Unknown Category')
+        content = thread_data.get('content', '')
+
+        # Determine confidence level
+        score = detect_info.get("score", 0.0)
+        if detect_info["immediate"]:
+            confidence = "🔴 HIGH (Immediate)"
+            color = discord.Color.red()
+        elif score >= 5.0:
+            confidence = "🟠 HIGH"
+            color = discord.Color.orange()
+        elif score >= 3.0:
+            confidence = "🟡 MEDIUM"
+            color = discord.Color.gold()
         else:
-            config = await self.config.get_raw()
+            confidence = "🟢 LOW"
+            color = discord.Color.green()
 
-        title_lower = title.lower() if title else ""
-        content_lower = content.lower() if content else ""
+        embed = discord.Embed(
+            title=title[:256],
+            url=url,
+            description=(content[:500] + "..." if len(content) > 500 else content) or "No content preview available",
+            color=color,
+            timestamp=datetime.now(timezone.utc)
+        )
 
-        # Initialize score
-        score = 0
+        embed.add_field(name="Confidence", value=confidence, inline=True)
+        embed.add_field(name="Score", value=f"{score:.1f}", inline=True)
+        embed.add_field(name="Category", value=category, inline=True)
 
-        # Get keywords from config (not hardcoded)
-        high_priority_keywords = config.get("high_priority_keywords", [])
-        primary_keywords = config.get("primary_keywords", [])
-        secondary_keywords = config.get("secondary_keywords", [])
-        negative_keywords = config.get("negative_keywords", [])
+        # Show only significant matches to reduce noise
+        matches = detect_info.get("matches", {})
+        for lvl in ("higher", "normal"):
+            vals = matches.get(lvl, [])
+            if vals:
+                embed.add_field(
+                    name=f"{lvl.title()} Keywords",
+                    value=", ".join(vals[:5]) + ("..." if len(vals) > 5 else ""),
+                    inline=False
+                )
 
-        # HIGH PRIORITY: Check config-based high priority keywords
-        for keyword in high_priority_keywords:
-            if keyword in title_lower or (content_lower and keyword in content_lower):
-                log.info(f"High priority keyword '{keyword}' found in post: {title}")
-                return True
+        # Show negative matches if they exist (for debugging)
+        if matches.get("negative"):
+            embed.add_field(
+                name="⚠️ Negative Indicators",
+                value=", ".join(matches["negative"][:3]),
+                inline=False
+            )
 
-        # Use only config-based keywords for all checks
-        for keyword in primary_keywords:
-            if keyword in title_lower:
-                score += 3
-            if content_lower and keyword in content_lower:
-                score += 2
+        embed.set_footer(text=f"by {author} • Hypixel Forums")
 
-        # Continue with secondary keywords from config...
-        for keyword in secondary_keywords:
-            if keyword in title_lower:
-                score += 2
-            if content_lower and keyword in content_lower:
-                score += 1
+        try:
+            await channel.send(embed=embed)
+        except Exception:
+            LOGGER.exception("Failed to send notification")
 
-        # Check negative keywords from config
-        negative_score = 0
-        for keyword in negative_keywords:
-            if keyword in title_lower:
-                negative_score += 1
-            if content_lower and keyword in content_lower:
-                negative_score += 0.5
+    async def _add_processed(self, guild: discord.Guild, thread_id: str):
+        async with self._global_lock:
+            processed = await self.config.guild(guild).processed_ids()
+            maxp = await self.config.guild(guild).max_processed()
+            if processed is None:
+                processed = []
+            processed.append(thread_id)
+            # keep most recent N
+            if len(processed) > maxp:
+                processed = processed[-maxp:]
+            await self.config.guild(guild).processed_ids.set(processed)
 
-        final_score = score - (negative_score * 1.5)
-        threshold = config.get("detection_threshold", 3.0)
+    async def _is_processed(self, guild: discord.Guild, thread_id: str) -> bool:
+        processed = await self.config.guild(guild).processed_ids()
+        return processed and thread_id in processed
 
-        return final_score >= threshold
+    async def _send_debug_message(self, guild: discord.Guild, message: str):
+        """Send debug message to the notification channel."""
+        debug_enabled = await self.config.guild(guild).default_debug()
+        if not debug_enabled:
+            return
 
-    def extract_thread_id_from_class(self, class_str: str) -> Optional[str]:
+        channel_id = await self.config.guild(guild).notify_channel_id()
+        if not channel_id:
+            return
+
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            return
+
+        try:
+            await channel.send(message)
+        except Exception:
+            LOGGER.exception("Failed to send debug message")
+
+    # ------------------------- Forum Parsing -------------------------
+    def _extract_thread_id_from_class(self, class_str: str) -> Optional[str]:
         """Extract thread ID from class attribute."""
         if not class_str:
             return None
@@ -231,9 +429,8 @@ class HypixelMonitor(commands.Cog):
             return match.group(1)
         return None
 
-    async def get_thread_content(self, thread_url: str) -> str:
+    async def _get_thread_content(self, session: aiohttp.ClientSession, thread_url: str) -> str:
         """Get the content of a thread."""
-        session = await self._get_session()
         try:
             async with session.get(thread_url) as response:
                 if response.status == 200:
@@ -250,13 +447,13 @@ class HypixelMonitor(commands.Cog):
                         return content
 
         except Exception as e:
-            log.warning(f"Error fetching thread content from {thread_url}: {e}")
+            LOGGER.warning("Error fetching thread content from %s: %s", thread_url, e)
 
         return ""
 
-    async def get_recent_threads(self, category: Dict[str, str]) -> List[Dict[str, str]]:
+    async def _get_recent_threads(self, session: aiohttp.ClientSession, category: Dict[str, str]) -> List[
+        Dict[str, str]]:
         """Get recent threads from a forum category."""
-        session = await self._get_session()
         threads = []
 
         try:
@@ -272,7 +469,7 @@ class HypixelMonitor(commands.Cog):
                             # Extract thread ID
                             class_attr = item.get('class', [])
                             class_str = ' '.join(class_attr)
-                            thread_id = self.extract_thread_id_from_class(class_str)
+                            thread_id = self._extract_thread_id_from_class(class_str)
 
                             if not thread_id:
                                 continue
@@ -303,364 +500,599 @@ class HypixelMonitor(commands.Cog):
                                 'url': full_url,
                                 'author': author,
                                 'category': category['name'],
-                                'content': ''
+                                'content': ''  # Will be fetched if needed
                             })
                         except Exception as e:
-                            log.warning(f"Error parsing thread item: {e}")
+                            LOGGER.warning("Error parsing thread item: %s", e)
                             continue
 
         except Exception as e:
-            log.error(f"Error fetching threads from {category['name']}: {e}")
+            LOGGER.error("Error fetching threads from %s: %s", category['name'], e)
 
         return threads
 
-    async def send_notification(self, guild: discord.Guild, thread_data: dict):
-        """Send notification about a new mod question"""
-        channel_id = await self.config.guild(guild).channel()
-        if not channel_id:
-            log.warning(f"No notification channel set for guild {guild.id}")
-            return
-
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
-            log.error(f"Could not find channel {channel_id} for guild {guild.id}")
-            return
+    # ------------------------- Monitoring Task -------------------------
+    async def _monitor_guild(self, guild: discord.Guild):
+        """Main monitoring loop for a guild."""
+        LOGGER.info("Starting monitor for guild %s", guild.id)
 
         try:
-            embed = discord.Embed(
-                title=thread_data['title'],
-                url=thread_data['url'],
-                description=thread_data['content'] if thread_data['content'] else "No content preview available",
-                color=discord.Color.orange(),
-                timestamp=datetime.now()
-            )
+            while True:
+                try:
+                    # Check if monitoring is still enabled
+                    enabled = await self.config.guild(guild).enabled()
+                    if not enabled:
+                        LOGGER.info("Monitoring disabled for guild %s; stopping task", guild.id)
+                        break
 
-            embed.set_footer(text=f"Posted in {thread_data['category']} • Hypixel Forums")
+                    # Get configuration
+                    categories = await self.config.guild(guild).forum_categories()
+                    if not categories:
+                        LOGGER.debug("No forum categories configured for guild %s", guild.id)
+                        await self._send_debug_message(guild,
+                                                       "⚠️ Hypixel monitor is alive but no forum categories are configured.")
+                    else:
+                        await self._monitor_categories(guild, categories)
 
-            await channel.send(f"New mod question in **{thread_data['category']}**:", embed=embed)
+                    # Wait for next check
+                    interval = await self.config.guild(guild).interval()
+                    if not isinstance(interval, int) or interval < MIN_INTERVAL:
+                        interval = MIN_INTERVAL
 
-        except discord.HTTPException as e:
-            log.error(f"Failed to send notification to channel {channel_id}: {e}")
-        except Exception as e:
-            log.error(f"Unexpected error sending notification: {e}")
+                    LOGGER.debug("Guild %s sleeping for %d seconds", guild.id, interval)
+                    await asyncio.sleep(interval)
 
-    async def check_forums(self, guild: discord.Guild):
-        """Check Hypixel forums for new mod questions"""
-        guild_config = self.config.guild(guild)
-        categories = await guild_config.forum_categories()
+                except asyncio.CancelledError:
+                    LOGGER.info("Monitor task cancelled for guild %s", guild.id)
+                    break
+                except Exception:
+                    LOGGER.exception("Error in monitoring loop for guild %s", guild.id)
+                    await self._send_debug_message(guild, "❌ Hypixel monitor encountered an error. Retrying in 60s...")
+                    await asyncio.sleep(60)
 
-        # Get processed posts as list and create set for fast lookup
-        current_processed_list = await guild_config.processed_posts()
-        processed_posts_set = set(str(pid) for pid in current_processed_list)
+        except asyncio.CancelledError:
+            LOGGER.info("Monitor task cancelled for guild %s", guild.id)
+        except Exception:
+            LOGGER.exception("Fatal error in monitor task for guild %s", guild.id)
+        finally:
+            # Cleanup
+            await self._cleanup_guild_task(guild.id)
 
-        newly_processed = []
+    async def _monitor_categories(self, guild: discord.Guild, categories: List[Dict[str, str]]):
+        """Monitor all configured forum categories for a guild."""
+        keywords = await self.config.guild(guild).keywords()
+        session = await self._get_session(guild)
 
-        log.info(f"Monitoring {len(categories)} forum categories with {len(processed_posts_set)} processed posts")
+        found_any_match = False
+        total_threads_checked = 0
 
         for category in categories:
             try:
-                threads = await self.get_recent_threads(category)
+                threads = await self._get_recent_threads(session, category)
+                threads_checked = 0
 
                 for thread in threads:
-                    thread_id = str(thread['id'])
+                    threads_checked += 1
+                    total_threads_checked += 1
 
-                    if thread_id in processed_posts_set:
-                        log.debug(f"Skipping processed thread {thread_id}")
+                    # Skip if already processed
+                    if await self._is_processed(guild, thread['id']):
                         continue
 
-                    log.info(f"Found new thread {thread_id}: '{thread['title'][:50]}'")
-                    newly_processed.append(thread_id)
+                    # Get thread content for better analysis
+                    if not thread['content']:
+                        thread['content'] = await self._get_thread_content(session, thread['url'])
 
-                    # Check if it's a mod question
-                    if await self.is_mod_question(thread['title'], thread.get('content', ''), guild.id):
-                        await self.send_notification(guild, thread)
-                        log.info(f"Sent notification for thread: {thread['title']}")
+                    # Analyze thread content
+                    title = thread['title'] or ""
+                    body = thread['content'] or ""
+                    detect = self._match_score(title, body, keywords)
 
-            except Exception as e:
-                log.error(f"Error checking category {category.get('name', 'Unknown')}: {e}")
-                continue
+                    # Check if we should notify
+                    should_notify = await self._should_notify(thread, detect, guild)
 
-        # Save processed posts with proper merging
-        if newly_processed:
-            # Merge and deduplicate
-            all_processed = list(processed_posts_set) + newly_processed
-            all_processed = list(dict.fromkeys(all_processed))  # Remove duplicates, preserve order
+                    if should_notify:
+                        found_any_match = True
+                        await self._notify(guild, thread, detect)
+                        LOGGER.info("Notified for thread %s in %s for guild %s", thread['id'], category['name'],
+                                    guild.id)
 
-            # Keep only last max_processed_posts
-            max_posts = await guild_config.max_processed_posts()
-            if len(all_processed) > max_posts:
-                all_processed = all_processed[-max_posts:]
+                    # Mark as processed regardless
+                    await self._add_processed(guild, thread['id'])
 
-            await guild_config.processed_posts.set(all_processed)
-            log.info(f"Updated processed posts: added {len(newly_processed)}, total {len(all_processed)}")
+                LOGGER.debug("Checked %d threads in %s for guild %s", threads_checked, category['name'], guild.id)
 
-    async def monitor_task(self, guild_id: int):
-        """Main monitoring task for a guild"""
-        while True:
+            except Exception:
+                LOGGER.exception("Error processing category %s for guild %s", category['name'], guild.id)
+
+        # Send debug message if no matches found and debug is enabled
+        if not found_any_match:
+            await self._send_debug_message(
+                guild,
+                f"✅ Hypixel monitor is alive. Checked {total_threads_checked} threads across {len(categories)} categor(y/ies). No matching threads found this cycle."
+            )
+
+    async def _cleanup_guild_task(self, guild_id: int):
+        """Clean up resources for a guild's monitoring task."""
+        # Remove task from tracking
+        self._tasks.pop(guild_id, None)
+
+        # Close aiohttp session
+        session = self._sessions.pop(guild_id, None)
+        if session:
             try:
-                guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    break
+                await session.close()
+            except Exception:
+                LOGGER.exception("Error closing aiohttp session for guild %s", guild_id)
 
-                guild_config = self.config.guild(guild)
-                if not await guild_config.enabled():
-                    break
+        # Remove task lock
+        self._task_locks.pop(guild_id, None)
 
-                await self.check_forums(guild)  # This method needs to exist
+        LOGGER.info("Cleanup completed for guild %s", guild_id)
 
-                interval = await guild_config.check_interval()
-                await asyncio.sleep(interval)
+    async def _ensure_task(self, guild: discord.Guild):
+        """Ensure a monitoring task is running for a guild (thread-safe)."""
+        if guild.id not in self._task_locks:
+            self._task_locks[guild.id] = asyncio.Lock()
 
-            except asyncio.CancelledError:
-                log.info(f"Monitoring task cancelled for guild {guild_id}")
-                break
-            except Exception as e:
-                log.error(f"Error in monitoring loop for guild {guild_id}: {e}")
-                log.error(f"Traceback: {traceback.format_exc()}")
-                await asyncio.sleep(60)  # Wait before retrying
+        async with self._task_locks[guild.id]:
+            # Check if task already exists and is healthy
+            existing_task = self._tasks.get(guild.id)
+            if existing_task and not existing_task.done():
+                LOGGER.debug("Task already running for guild %s", guild.id)
+                return
 
-    @commands.group(name="hypixelmonitor", aliases=["hm"])
+            # Clean up any done task
+            if existing_task:
+                LOGGER.info("Cleaning up completed task for guild %s", guild.id)
+                await self._cleanup_guild_task(guild.id)
+
+            # Check if monitoring is enabled
+            enabled = await self.config.guild(guild).enabled()
+            if not enabled:
+                LOGGER.debug("Monitoring disabled for guild %s, not starting task", guild.id)
+                return
+
+            # Create new task
+            LOGGER.info("Creating new monitoring task for guild %s", guild.id)
+            task = self.bot.loop.create_task(self._monitor_guild(guild))
+            self._tasks[guild.id] = task
+
+    async def _stop_task(self, guild: discord.Guild):
+        """Stop monitoring task for a guild (thread-safe)."""
+        if guild.id not in self._task_locks:
+            return
+
+        async with self._task_locks[guild.id]:
+            task = self._tasks.get(guild.id)
+            if task and not task.cancelled():
+                LOGGER.info("Stopping monitoring task for guild %s", guild.id)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            await self._cleanup_guild_task(guild.id)
+
+    # ------------------------- Commands -------------------------
+    @commands.group()
     @commands.guild_only()
-    @checks.admin_or_permissions(manage_guild=True)
-    async def hypixelmonitor(self, ctx):
-        """Hypixel Forums monitoring commands."""
+    async def hmonitor(self, ctx: commands.Context):
+        """Hypixel monitor commands. Use 'quicksetup' or 'loaddefaults' to get started quickly."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help()
 
-    @hypixelmonitor.command(name="setup")
-    async def setup(self, ctx):
-        """Set up the Hypixel Forums monitor."""
-        embed = discord.Embed(
-            title="Hypixel Forums Monitor Setup",
-            description="The Hypixel Forums monitor will watch for mod-related questions and technical help requests.",
-            color=discord.Color.blue()
-        )
+    @hmonitor.command(name="quicksetup")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def quicksetup(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Quick setup: set channel and load default keywords."""
+        await self.config.guild(ctx.guild).notify_channel_id.set(channel.id)
+        await self.config.guild(ctx.guild).keywords.set(deepcopy(DEFAULT_KEYWORDS))
+        await self.config.guild(ctx.guild).forum_categories.set(deepcopy(DEFAULT_FORUM_CATEGORIES))
 
-        embed.add_field(
-            name="Next Steps",
-            value="1. Set a notification channel: `[p]hypixelmonitor channel #channel`\n"
-                  "2. Enable monitoring: `[p]hypixelmonitor toggle`\n"
-                  "3. Check status: `[p]hypixelmonitor status`",
-            inline=False
-        )
+        await ctx.send(f"✅ Quick setup complete!\n"
+                       f"📢 Notification channel: {channel.mention}\n"
+                       f"🔑 Default keywords loaded\n"
+                       f"📂 Default forum categories loaded\n"
+                       f"⚙️ Next step: Enable monitoring with `{ctx.prefix}hmonitor enable`")
 
-        await ctx.send(embed=embed)
+    # Channel management
+    @hmonitor.command(name="setchannel")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where Hypixel forum notifications will be posted."""
+        await self.config.guild(ctx.guild).notify_channel_id.set(channel.id)
+        await ctx.send(f"Notification channel set to {channel.mention}")
 
-    @hypixelmonitor.command(name="channel")
-    async def set_channel(self, ctx, channel: discord.TextChannel = None):
-        """Set the notification channel for Hypixel Forums alerts."""
-        if not channel:
-            channel = ctx.channel
+    # Forum category management
+    @hmonitor.command(name="addcategory")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def addcategory(self, ctx: commands.Context, url: str, *, name: str):
+        """Add a forum category to monitor."""
+        async with self.config.guild(ctx.guild).forum_categories() as categories:
+            if any(cat['url'] == url or cat['name'] == name for cat in categories):
+                await ctx.send("A category with that URL or name already exists.")
+                return
+            categories.append({"url": url, "name": name})
+        await ctx.send(f"Added forum category: {name}")
 
-        await self.config.guild(ctx.guild).channel.set(channel.id)
-        await ctx.send(f"✅ Notification channel set to {channel.mention}")
+    @hmonitor.command(name="remcategory")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def remcategory(self, ctx: commands.Context, *, name: str):
+        """Remove a forum category from monitoring."""
+        async with self.config.guild(ctx.guild).forum_categories() as categories:
+            original_length = len(categories)
+            categories[:] = [cat for cat in categories if cat['name'] != name]
+            if len(categories) == original_length:
+                await ctx.send("That category is not in the monitored list.")
+                return
+        await ctx.send(f"Removed forum category: {name}")
 
-    @hypixelmonitor.command(name="category")
-    async def category_manage(self, ctx, action: str, *, category_info: str = None):
-        """Manage forum categories to monitor.
+    @hmonitor.command(name="listcategories")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def listcategories(self, ctx: commands.Context):
+        """List all monitored forum categories."""
+        categories = await self.config.guild(ctx.guild).forum_categories()
+        if not categories:
+            await ctx.send("No forum categories configured.")
+            return
 
-        Actions: add, remove, list
-        For add: `[p]hypixelmonitor category add <url> <name>`
-        For remove: `[p]hypixelmonitor category remove <name>`
-        """
-        if action.lower() == "list":
+        msg_lines = ["Monitored forum categories:"]
+        for cat in categories:
+            msg_lines.append(f"- **{cat['name']}**: {cat['url']}")
+
+        msg = "\n".join(msg_lines)
+        for page in pagify(msg):
+            await ctx.send(page)
+
+    # Enable / disable
+    @hmonitor.command(name="enable")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def enable(self, ctx: commands.Context):
+        """Enable monitoring for this guild."""
+        enabled = await self.config.guild(ctx.guild).enabled()
+        if enabled:
+            await ctx.send("Monitoring is already enabled. Use `!hmonitor disable` to turn off.")
+            return
+        await self.config.guild(ctx.guild).enabled.set(True)
+        await ctx.send("Monitoring enabled for this guild.")
+        await self._ensure_task(ctx.guild)
+
+    @hmonitor.command(name="disable")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def disable(self, ctx: commands.Context):
+        """Disable monitoring for this guild."""
+        await self.config.guild(ctx.guild).enabled.set(False)
+        await self._stop_task(ctx.guild)
+        await ctx.send("Monitoring disabled for this guild.")
+
+    # Interval and threshold
+    @hmonitor.command(name="setinterval")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def setinterval(self, ctx: commands.Context, seconds: int):
+        """Set check interval in seconds (minimum 60)."""
+        if seconds < MIN_INTERVAL:
+            await ctx.send(f"Interval must be at least {MIN_INTERVAL} seconds.")
+            return
+        await self.config.guild(ctx.guild).interval.set(seconds)
+        await ctx.send(f"Check interval set to {seconds} seconds.")
+
+    @hmonitor.command(name="setthreshold")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def setthreshold(self, ctx: commands.Context, threshold: float):
+        """Set detection threshold (float between 1.0 and 10.0)."""
+        if threshold < 1.0 or threshold > 10.0:
+            await ctx.send("Threshold must be between 1.0 and 10.0")
+            return
+        await self.config.guild(ctx.guild).threshold.set(threshold)
+        await ctx.send(f"Detection threshold set to {threshold}")
+
+    # Keywords management
+    @hmonitor.group(name="keyword")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def keyword(self, ctx: commands.Context):
+        """Manage detection keywords. Subcommands: add/remove/list"""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help()
+
+    @keyword.command(name="add")
+    async def keyword_add(self, ctx: commands.Context, level: str, *, pattern: str):
+        """Add a keyword/pattern to a level. Levels: higher, normal, lower, negative"""
+        level = level.lower()
+        if level not in ("higher", "normal", "lower", "negative"):
+            await ctx.send("Invalid level. Use higher, normal, lower, or negative.")
+            return
+        async with self.config.guild(ctx.guild).keywords() as kw:
+            kw[level].append(pattern)
+        await ctx.send(f"Added pattern to {level}: `{pattern}`")
+
+    @keyword.command(name="remove")
+    async def keyword_remove(self, ctx: commands.Context, level: str, *, pattern: str):
+        level = level.lower()
+        if level not in ("higher", "normal", "lower", "negative"):
+            await ctx.send("Invalid level. Use higher, normal, lower, or negative.")
+            return
+        async with self.config.guild(ctx.guild).keywords() as kw:
+            if pattern not in kw[level]:
+                await ctx.send("Pattern not found in that level.")
+                return
+            kw[level].remove(pattern)
+        await ctx.send(f"Removed pattern from {level}: `{pattern}`")
+
+    @keyword.command(name="list")
+    async def keyword_list(self, ctx: commands.Context):
+        kw = await self.config.guild(ctx.guild).keywords()
+        msg_lines = []
+        for lvl in ("higher", "normal", "lower", "negative"):
+            vals = kw.get(lvl, []) or []
+            msg_lines.append(f"{lvl.title()} ({len(vals)}):")
+            for v in vals:
+                msg_lines.append(f"  - {v}")
+        for page in pagify("\n".join(msg_lines)):
+            await ctx.send(page)
+
+    @hmonitor.command(name="loaddefaults")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def loaddefaults(self, ctx: commands.Context, merge: bool = False):
+        """Load default keyword sets. Use 'true' as second argument to merge with existing keywords instead of replacing."""
+        if merge:
+            async with self.config.guild(ctx.guild).keywords() as kw:
+                for level, defaults in DEFAULT_KEYWORDS.items():
+                    existing = set(kw.get(level, []))
+                    new_keywords = existing.union(set(defaults))
+                    kw[level] = list(new_keywords)
+            await ctx.send("Default keywords merged with existing keywords.")
+        else:
+            await self.config.guild(ctx.guild).keywords.set(DEFAULT_KEYWORDS.copy())
+            await ctx.send("Default keywords loaded (existing keywords replaced).")
+
+        # Show summary
+        kw = await self.config.guild(ctx.guild).keywords()
+        summary = []
+        for level in ("higher", "normal", "lower", "negative"):
+            count = len(kw.get(level, []))
+            summary.append(f"{level}: {count}")
+
+        await ctx.send(f"Keyword counts: {', '.join(summary)}")
+
+    # Processed IDs / storage
+    @hmonitor.command(name="setmaxprocessed")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def setmaxprocessed(self, ctx: commands.Context, max_items: int):
+        """Set maximum number of processed forum thread IDs stored to control storage usage."""
+        if max_items < 10:
+            await ctx.send("max_processed must be at least 10")
+            return
+        await self.config.guild(ctx.guild).max_processed.set(max_items)
+        await ctx.send(f"max_processed set to {max_items}")
+
+    @hmonitor.command(name="processedcount")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def processedcount(self, ctx: commands.Context):
+        processed = await self.config.guild(ctx.guild).processed_ids()
+        cnt = len(processed) if processed else 0
+        await ctx.send(f"Stored processed thread IDs: {cnt}")
+
+    # Manual checks and status
+    @hmonitor.command(name="checknow")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def checknow(self, ctx: commands.Context):
+        """Run a manual check now in this guild."""
+        await ctx.send("Running manual check...")
+
+        try:
+            # Get configuration
             categories = await self.config.guild(ctx.guild).forum_categories()
+            if not categories:
+                await ctx.send("❌ No forum categories configured.")
+                return
+
+            # Run one monitoring cycle
+            await self._monitor_categories(ctx.guild, categories)
+            await ctx.send("✅ Manual check completed.")
+
+        except Exception as e:
+            LOGGER.exception("Error during manual check")
+            await ctx.send(f"❌ Error during manual check: {str(e)}")
+
+    @hmonitor.command(name="status")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def status(self, ctx: commands.Context):
+        """Show current monitoring status and configuration for this guild."""
+        enabled = await self.config.guild(ctx.guild).enabled()
+        categories = await self.config.guild(ctx.guild).forum_categories()
+        channel_id = await self.config.guild(ctx.guild).notify_channel_id()
+        interval = await self.config.guild(ctx.guild).interval()
+        threshold = await self.config.guild(ctx.guild).threshold()
+        maxp = await self.config.guild(ctx.guild).max_processed()
+        kw = await self.config.guild(ctx.guild).keywords()
+        debug = await self.config.guild(ctx.guild).default_debug()
+
+        # Check task status
+        task = self._tasks.get(ctx.guild.id)
+        if task and not task.done():
+            task_status = "🟢 Running"
+        elif task and task.done():
+            task_status = "🔴 Stopped (task completed/failed)"
+        else:
+            task_status = "🔴 Not running"
+
+        channel = ctx.guild.get_channel(channel_id) if channel_id else None
+        lines = [
+            f"**Hypixel Monitor Status**",
+            f"Enabled: {enabled}",
+            f"Task Status: {task_status}",
+            f"Channel: {channel.mention if channel else 'Not set'}",
+            f"Forum Categories: {len(categories)}",
+            f"Interval: {interval}s",
+            f"Threshold: {threshold}",
+            f"Debug Mode: {debug}",
+            f"Max processed stored: {maxp}",
+            f"Keywords: higher={len(kw.get('higher') or [])}, normal={len(kw.get('normal') or [])}, lower={len(kw.get('lower') or [])}, negative={len(kw.get('negative') or [])}",
+        ]
+
+        await ctx.send("\n".join(lines))
+
+    @hmonitor.command(name="restart")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def restart(self, ctx: commands.Context):
+        """Restart the monitoring task for this guild."""
+        await ctx.send("Restarting monitoring task...")
+        await self._stop_task(ctx.guild)
+        await asyncio.sleep(1)  # Give it a moment to clean up
+        await self._ensure_task(ctx.guild)
+        await ctx.send("✅ Monitoring task restarted.")
+
+    # Test detection
+    @hmonitor.command(name="testdetect")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def testdetect(self, ctx: commands.Context, *, title_and_body: str):
+        """Test the detection algorithm with a sample title (and optional body separated by '\\n')."""
+        if "\n" in title_and_body:
+            title, body = title_and_body.split("\n", 1)
+        else:
+            title, body = title_and_body, ""
+        keywords = await self.config.guild(ctx.guild).keywords()
+        detect = self._match_score(title, body, keywords)
+        lines = [f"Immediate match: {detect['immediate']}", f"Score: {detect['score']}", "Matches:"]
+        for lvl, vals in detect["matches"].items():
+            lines.append(f"  {lvl}: {', '.join(vals) if vals else 'None'}")
+        await ctx.send("\n".join(lines))
+
+    @hmonitor.command(name="debugmode")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def debugmode(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable debug mode (sends 'alive' messages when no matches found)."""
+        await self.config.guild(ctx.guild).default_debug.set(enabled)
+        await ctx.send(f"Debug mode set to: {enabled}")
+
+    @hmonitor.command(name="tune")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def tune_detection(self, ctx: commands.Context, category_name: str = None, limit: int = 10):
+        """Test detection on recent threads from a forum category to tune accuracy."""
+        categories = await self.config.guild(ctx.guild).forum_categories()
+
+        if category_name:
+            # Find specific category
+            category = next((cat for cat in categories if cat['name'].lower() == category_name.lower()), None)
+            if not category:
+                await ctx.send(
+                    f"Category '{category_name}' not found. Available categories: {', '.join(cat['name'] for cat in categories)}")
+                return
+            test_categories = [category]
+        else:
+            # Use first category if none specified
             if not categories:
                 await ctx.send("No forum categories configured.")
                 return
+            test_categories = [categories[0]]
 
-            embed = discord.Embed(title="Monitored Forum Categories", color=discord.Color.blue())
-            for cat in categories:
-                embed.add_field(name=cat['name'], value=cat['url'], inline=False)
+        keywords = await self.config.guild(ctx.guild).keywords()
+        threshold = await self.config.guild(ctx.guild).threshold()
+        session = await self._get_session(ctx.guild)
 
-            await ctx.send(embed=embed)
-
-        elif action.lower() == "add":
-            if not category_info:
-                await ctx.send("Please provide URL and name: `[p]hypixelmonitor category add <url> <name>`")
-                return
-
-            parts = category_info.split(' ', 1)
-            if len(parts) != 2:
-                await ctx.send("Please provide both URL and name: `[p]hypixelmonitor category add <url> <name>`")
-                return
-
-            url, name = parts
-            categories = await self.config.guild(ctx.guild).forum_categories()
-            categories.append({"url": url, "name": name})
-            await self.config.guild(ctx.guild).forum_categories.set(categories)
-            await ctx.send(f"Added forum category: {name}")
-
-        elif action.lower() == "remove":
-            if not category_info:
-                await ctx.send("Please provide the category name to remove.")
-                return
-
-            categories = await self.config.guild(ctx.guild).forum_categories()
-            categories = [cat for cat in categories if cat['name'] != category_info]
-            await self.config.guild(ctx.guild).forum_categories.set(categories)
-            await ctx.send(f"Removed forum category: {category_info}")
-
-        else:
-            await ctx.send("Invalid action. Use: add, remove, or list")
-
-    @hypixelmonitor.command(name="keywords")
-    async def manage_keywords(self, ctx, keyword_type: str, action: str, *, keyword: str = None):
-        """Manage detection keywords.
-
-        Types: primary, secondary, negative
-        Actions: add, remove, list
-        """
-        valid_types = ["primary", "secondary", "negative"]
-        if keyword_type not in valid_types:
-            await ctx.send(f"Invalid keyword type. Use: {', '.join(valid_types)}")
-            return
-
-        config_key = f"{keyword_type}_keywords"
-
-        if action.lower() == "list":
-            keywords = await self.config.guild(ctx.guild).get_raw(config_key)
-            if not keywords:
-                await ctx.send(f"No {keyword_type} keywords configured.")
-                return
-
-            embed = discord.Embed(title=f"{keyword_type.title()} Keywords", color=discord.Color.blue())
-            embed.description = ", ".join(keywords)
-            await ctx.send(embed=embed)
-
-        elif action.lower() == "add":
-            if not keyword:
-                await ctx.send("Please provide a keyword to add.")
-                return
-
-            keywords = await self.config.guild(ctx.guild).get_raw(config_key)
-            if keyword not in keywords:
-                keywords.append(keyword)
-                await self.config.guild(ctx.guild).set_raw(config_key, value=keywords)
-                await ctx.send(f"Added {keyword_type} keyword: {keyword}")
-            else:
-                await ctx.send(f"Keyword '{keyword}' already exists in {keyword_type} keywords.")
-
-        elif action.lower() == "remove":
-            if not keyword:
-                await ctx.send("Please provide a keyword to remove.")
-                return
-
-            keywords = await self.config.guild(ctx.guild).get_raw(config_key)
-            if keyword in keywords:
-                keywords.remove(keyword)
-                await self.config.guild(ctx.guild).set_raw(config_key, value=keywords)
-                await ctx.send(f"Removed {keyword_type} keyword: {keyword}")
-            else:
-                await ctx.send(f"Keyword '{keyword}' not found in {keyword_type} keywords.")
-
-        else:
-            await ctx.send("Invalid action. Use: add, remove, or list")
-
-    @hypixelmonitor.command(name="status")
-    async def status(self, ctx):
-        """Show current monitoring status."""
-        config = await self.config.guild(ctx.guild).all()
-
-        embed = discord.Embed(
-            title="Hypixel Forums Monitor Status",
-            color=discord.Color.green() if config['enabled'] else discord.Color.red()
-        )
-
-        # Basic status
-        status = "🟢 Enabled" if config['enabled'] else "🔴 Disabled"
-        embed.add_field(name="Status", value=status, inline=True)
-
-        # Channel
-        channel_id = config['channel']
-        if channel_id:
-            channel = ctx.guild.get_channel(channel_id)
-            channel_text = f"<#{channel_id}>" if channel else "Not set"
-        else:
-            channel_text = "Not set"
-        embed.add_field(name="Channel", value=channel_text, inline=True)
-
-        # Check interval
-        embed.add_field(name="Interval", value=f"{config['check_interval']}s", inline=True)
-
-        # Categories
-        embed.add_field(name="Forum Categories", value=str(len(config['forum_categories'])), inline=True)
-
-        # Keywords
-        embed.add_field(name="Primary Keywords", value=str(len(config['primary_keywords'])), inline=True)
-        embed.add_field(name="Detection Threshold", value=str(config['detection_threshold']), inline=True)
-
-        # Processed posts
-        embed.add_field(name="Processed Posts", value=str(len(config['processed_posts'])), inline=True)
-
-        # Task status
-        task_status = "Running" if ctx.guild.id in self.monitor_tasks else "Stopped"
-        embed.add_field(name="Task Status", value=task_status, inline=True)
-
-        await ctx.send(embed=embed)
-
-    @hypixelmonitor.command(name="toggle")
-    async def toggle(self, ctx):
-        """Toggle monitoring on/off."""
-        config = await self.config.guild(ctx.guild).all()
-
-        if config['enabled']:
-            # Stop monitoring
-            await self.config.guild(ctx.guild).enabled.set(False)
-            await self.stop_monitoring(ctx.guild)
-            await ctx.send("✅ Monitoring disabled")
-        else:
-            # Start monitoring
-            if not config['channel']:
-                await ctx.send("❌ Please set a notification channel first using `hypixelmonitor channel`")
-                return
-
-            await self.config.guild(ctx.guild).enabled.set(True)
-            await self.start_monitoring(ctx.guild)
-            await ctx.send("✅ Monitoring enabled")
-
-    @hypixelmonitor.command(name="check")
-    async def manual_check(self, ctx):
-        """Manually check for new mod questions."""
-        config = await self.config.guild(ctx.guild).all()
-
-        if not config['channel']:
-            await ctx.send("❌ Please set a notification channel first using `hypixelmonitor channel`")
-            return
-
-        await ctx.send("🔍 Checking for new mod questions...")
-        
         try:
-            await self.monitor_forums(ctx.guild.id)
-            await ctx.send("✅ Manual check completed!")
+            results = []
+
+            for category in test_categories:
+                threads = await self._get_recent_threads(session, category)
+
+                for i, thread in enumerate(threads[:limit]):
+                    if not thread['content']:
+                        thread['content'] = await self._get_thread_content(session, thread['url'])
+
+                    title = thread['title'] or ""
+                    body = thread['content'] or ""
+
+                    detect = self._match_score(title, body, keywords)
+                    would_notify = await self._should_notify(thread, detect, ctx.guild)
+
+                    results.append({
+                        "title": title[:50] + ("..." if len(title) > 50 else ""),
+                        "score": detect["score"],
+                        "notify": would_notify,
+                        "matches": sum(len(v) for v in detect["matches"].values())
+                    })
+
+            # Format results
+            msg = f"**Detection Test Results**\n```\n"
+            msg += f"{'Title':<52} {'Score':<6} {'Notify':<6} {'Matches'}\n"
+            msg += "-" * 75 + "\n"
+
+            for r in results:
+                notify_icon = "✓" if r["notify"] else "✗"
+                msg += f"{r['title']:<52} {r['score']:<6.1f} {notify_icon:<6} {r['matches']}\n"
+
+            msg += "```"
+
+            for page in pagify(msg):
+                await ctx.send(page)
+
         except Exception as e:
-            await ctx.send(f"❌ Error during manual check: {e}")
-            log.error(f"Manual check error for guild {ctx.guild.id}: {e}")
+            await ctx.send(f"Error testing detection: {e}")
 
-    @hypixelmonitor.command(name="test")
-    async def test_detection(self, ctx, *, post_title: str):
-        """Test the mod detection algorithm on a post title."""
-        is_mod = await self.is_mod_question(post_title, guild_id=ctx.guild.id)
+    # Additional debugging commands
+    @hmonitor.command(name="taskinfo")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def taskinfo(self, ctx: commands.Context):
+        """Show detailed information about the monitoring task."""
+        task = self._tasks.get(ctx.guild.id)
 
-        result = "✅ Would be detected" if is_mod else "❌ Would not be detected"
-        await ctx.send(f"**Test Result:** {result}\n**Title:** {post_title}")
-
-    @hypixelmonitor.command(name="interval")
-    async def set_interval(self, ctx, seconds: int):
-        """Set the check interval in seconds (minimum 60)."""
-        if seconds < 60:
-            await ctx.send("❌ Interval must be at least 60 seconds")
+        if not task:
+            await ctx.send("❌ No monitoring task exists for this guild.")
             return
 
-        await self.config.guild(ctx.guild).check_interval.set(seconds)
-        await ctx.send(f"✅ Check interval set to {seconds} seconds")
+        lines = [
+            f"**Task Information for Guild {ctx.guild.id}**",
+            f"Task exists: ✅ Yes",
+            f"Task done: {'✅ Yes' if task.done() else '❌ No'}",
+            f"Task cancelled: {'✅ Yes' if task.cancelled() else '❌ No'}",
+        ]
 
-    @hypixelmonitor.command(name="threshold")
-    async def set_threshold(self, ctx, threshold: float):
-        """Set the detection threshold (1.0-10.0)."""
-        if not 1.0 <= threshold <= 10.0:
-            await ctx.send("❌ Threshold must be between 1.0 and 10.0")
-            return
+        if task.done():
+            try:
+                exception = task.exception()
+                if exception:
+                    lines.append(f"Exception: {type(exception).__name__}: {exception}")
+                else:
+                    lines.append("Completed normally")
+            except asyncio.InvalidStateError:
+                lines.append("Task state unknown")
 
-        await self.config.guild(ctx.guild).detection_threshold.set(threshold)
-        await ctx.send(f"✅ Detection threshold set to {threshold}")
+        # Show lock status
+        has_lock = ctx.guild.id in self._task_locks
+        lines.append(f"Has task lock: {'✅ Yes' if has_lock else '❌ No'}")
+
+        # Show session status
+        has_session = ctx.guild.id in self._sessions
+        lines.append(f"Has HTTP session: {'✅ Yes' if has_session else '❌ No'}")
+
+        await ctx.send("\n".join(lines))
+
+    @hmonitor.command(name="cleartasks")
+    @commands.is_owner()
+    async def cleartasks(self, ctx: commands.Context):
+        """[Owner Only] Clear all monitoring tasks and restart them."""
+        await ctx.send("🔄 Clearing all monitoring tasks...")
+
+        # Cancel all tasks
+        tasks_cancelled = 0
+        for guild_id, task in list(self._tasks.items()):
+            if not task.cancelled():
+                task.cancel()
+                tasks_cancelled += 1
+
+        # Wait for cancellation
+        if tasks_cancelled > 0:
+            await asyncio.sleep(2)
+
+        # Clean up all guild tasks
+        guilds_cleaned = len(self._tasks)
+        for guild_id in list(self._tasks.keys()):
+            await self._cleanup_guild_task(guild_id)
+
+        await ctx.send(f"✅ Cleared {tasks_cancelled} tasks and cleaned up {guilds_cleaned} guilds.")
+
+        # Restart tasks for enabled guilds
+        await self._startup_tasks()
+        await ctx.send("✅ Restarted monitoring tasks for enabled guilds.")
