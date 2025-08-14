@@ -122,23 +122,56 @@ class RedditMonitor(commands.Cog):
 
         self.config.register_guild(**default_guild)
 
-        # runtime state
+        # runtime state - improved task management
         self._tasks: Dict[int, asyncio.Task] = {}  # guild_id -> task
         self._reddit_clients: Dict[int, asyncpraw.Reddit] = {}  # guild_id -> reddit instance
-        self._lock = asyncio.Lock()
+        self._task_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> lock for task creation
+        self._global_lock = asyncio.Lock()
+
+    async def cog_load(self) -> None:
+        """Start monitoring tasks for all enabled guilds when the cog loads."""
+        await self._startup_tasks()
+
+    async def _startup_tasks(self):
+        """Start monitoring tasks for all guilds that have monitoring enabled."""
+        try:
+            all_guilds = await self.config.all_guilds()
+            for guild_id, guild_config in all_guilds.items():
+                if guild_config.get("enabled", False):
+                    guild = self.bot.get_guild(guild_id)
+                    if guild:
+                        await self._ensure_task(guild)
+                        LOGGER.info("Started monitoring task for guild %s on cog load", guild_id)
+        except Exception:
+            LOGGER.exception("Error during startup task creation")
 
     async def cog_unload(self) -> None:
-        # cancel monitoring tasks
-        for task in list(self._tasks.values()):
-            task.cancel()
+        """Clean shutdown of all monitoring tasks."""
+        LOGGER.info("Shutting down RedditMonitor cog...")
+
+        # Cancel all monitoring tasks
+        tasks_to_cancel = list(self._tasks.values())
+        for task in tasks_to_cancel:
+            if not task.cancelled():
+                task.cancel()
+
+        # Wait for tasks to finish cancelling
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
         self._tasks.clear()
-        # cleanup reddit clients
-        for r in list(self._reddit_clients.values()):
+
+        # Cleanup reddit clients
+        clients_to_close = list(self._reddit_clients.values())
+        for reddit in clients_to_close:
             try:
-                await r.close()
+                await reddit.close()
             except Exception:
-                pass
+                LOGGER.exception("Error closing reddit client")
+
         self._reddit_clients.clear()
+        self._task_locks.clear()
+        LOGGER.info("RedditMonitor cog shutdown complete")
 
     # ------------------------- Helpers -------------------------
     async def _get_reddit(self, guild: discord.Guild) -> Optional[asyncpraw.Reddit]:
@@ -161,12 +194,11 @@ class RedditMonitor(commands.Cog):
                 client_secret=creds["client_secret"],
                 user_agent=creds["user_agent"],
             )
+            self._reddit_clients[guild.id] = reddit
+            return reddit
         except Exception as e:
             LOGGER.exception("Failed to create asyncpraw Reddit instance: %s", e)
             return None
-
-        self._reddit_clients[guild.id] = reddit
-        return reddit
 
     def _compile_patterns(self, patterns: List[str]) -> List[re.Pattern]:
         compiled = []
@@ -359,7 +391,7 @@ class RedditMonitor(commands.Cog):
             LOGGER.exception("Failed to send notification")
 
     async def _add_processed(self, guild: discord.Guild, post_id: str):
-        async with self._lock:
+        async with self._global_lock:
             processed = await self.config.guild(guild).processed_ids()
             maxp = await self.config.guild(guild).max_processed()
             if processed is None:
@@ -374,9 +406,30 @@ class RedditMonitor(commands.Cog):
         processed = await self.config.guild(guild).processed_ids()
         return processed and post_id in processed
 
+    async def _send_debug_message(self, guild: discord.Guild, message: str):
+        """Send debug message to the notification channel."""
+        debug_enabled = await self.config.guild(guild).default_debug()
+        if not debug_enabled:
+            return
+
+        channel_id = await self.config.guild(guild).notify_channel_id()
+        if not channel_id:
+            return
+
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            return
+
+        try:
+            await channel.send(message)
+        except Exception:
+            LOGGER.exception("Failed to send debug message")
+
     # ------------------------- Monitoring Task -------------------------
     async def _monitor_guild(self, guild: discord.Guild):
+        """Main monitoring loop for a guild."""
         LOGGER.info("Starting monitor for guild %s", guild.id)
+
         try:
             reddit = await self._get_reddit(guild)
             if reddit is None:
@@ -385,98 +438,163 @@ class RedditMonitor(commands.Cog):
 
             while True:
                 try:
+                    # Check if monitoring is still enabled
                     enabled = await self.config.guild(guild).enabled()
                     if not enabled:
                         LOGGER.info("Monitoring disabled for guild %s; stopping task", guild.id)
-                        return
+                        break
 
+                    # Get configuration
                     subs = await self.config.guild(guild).subreddits()
                     if not subs:
                         LOGGER.debug("No subreddits configured for guild %s", guild.id)
+                        await self._send_debug_message(guild,
+                                                       "⚠️ Reddit monitor is alive but no subreddits are configured.")
                     else:
-                        keywords = await self.config.guild(guild).keywords()
-                        threshold = await self.config.guild(guild).threshold()
-                        flair_filter = await self.config.guild(guild).flair_filter()
+                        await self._monitor_subreddits(guild, reddit, subs)
 
-                        found_match = False  # <-- Add this line
-
-                        for sub in list(subs):
-                            try:
-                                subreddit = await reddit.subreddit(sub)
-                                async for submission in subreddit.new(limit=25):
-                                    if await self._is_processed(guild, submission.id):
-                                        continue
-
-                                    if flair_filter:
-                                        flair = getattr(submission, "link_flair_text", None)
-                                        if not flair or flair_filter.lower() not in str(flair).lower():
-                                            continue
-
-                                    title = submission.title or ""
-                                    body = getattr(submission, "selftext", "") or ""
-
-                                    detect = self._match_score(title, body, keywords)
-
-                                    detected = False
-                                    if detect["immediate"]:
-                                        detected = True
-                                    elif detect["score"] >= threshold:
-                                        detected = True
-
-                                    if detect["matches"]["negative"]:
-                                        if len(detect["matches"]["negative"]) > len(detect["matches"]["normal"]) + len(
-                                                detect["matches"]["lower"]):
-                                            detected = False
-
-                                    if detected:
-                                        found_match = True  # <-- Set to True if match found
-                                        await self._notify(guild, submission, detect)
-
-                                    await self._add_processed(guild, submission.id)
-
-                            except Exception:
-                                LOGGER.exception("Error processing subreddit %s for guild %s", sub, guild.id)
-
-                        # Send debug message if no matches found and debug mode is enabled
-                        debug_enabled = await self.config.guild(guild).default_debug()
-                        if not found_match and debug_enabled:
-                            channel_id = await self.config.guild(guild).notify_channel_id()
-                            channel = guild.get_channel(channel_id) if channel_id else None
-                            if channel:
-                                await channel.send("✅ Reddit monitor is alive. No matching posts found this cycle.")
-
+                    # Wait for next check
                     interval = await self.config.guild(guild).interval()
                     if not isinstance(interval, int) or interval < MIN_INTERVAL:
                         interval = MIN_INTERVAL
+
+                    LOGGER.debug("Guild %s sleeping for %d seconds", guild.id, interval)
                     await asyncio.sleep(interval)
 
                 except asyncio.CancelledError:
-                    raise
+                    LOGGER.info("Monitor task cancelled for guild %s", guild.id)
+                    break
                 except Exception:
-                    LOGGER.exception("Unhandled error in monitoring loop for guild %s", guild.id)
+                    LOGGER.exception("Error in monitoring loop for guild %s", guild.id)
+                    await self._send_debug_message(guild, "❌ Reddit monitor encountered an error. Retrying in 60s...")
                     await asyncio.sleep(60)
 
         except asyncio.CancelledError:
             LOGGER.info("Monitor task cancelled for guild %s", guild.id)
+        except Exception:
+            LOGGER.exception("Fatal error in monitor task for guild %s", guild.id)
         finally:
+            # Cleanup
+            await self._cleanup_guild_task(guild.id)
+
+    async def _monitor_subreddits(self, guild: discord.Guild, reddit: asyncpraw.Reddit, subreddits: List[str]):
+        """Monitor all configured subreddits for a guild."""
+        keywords = await self.config.guild(guild).keywords()
+        threshold = await self.config.guild(guild).threshold()
+        flair_filter = await self.config.guild(guild).flair_filter()
+
+        found_any_match = False
+        total_posts_checked = 0
+
+        for sub_name in subreddits:
             try:
-                rc = self._reddit_clients.pop(guild.id, None)
-                if rc:
-                    await rc.close()
+                subreddit = await reddit.subreddit(sub_name)
+                posts_checked = 0
+
+                async for submission in subreddit.new(limit=25):
+                    posts_checked += 1
+                    total_posts_checked += 1
+
+                    # Skip if already processed
+                    if await self._is_processed(guild, submission.id):
+                        continue
+
+                    # Apply flair filter if configured
+                    if flair_filter:
+                        flair = getattr(submission, "link_flair_text", None)
+                        if not flair or flair_filter.lower() not in str(flair).lower():
+                            await self._add_processed(guild, submission.id)
+                            continue
+
+                    # Analyze post content
+                    title = submission.title or ""
+                    body = getattr(submission, "selftext", "") or ""
+                    detect = self._match_score(title, body, keywords)
+
+                    # Check if we should notify
+                    should_notify = await self._should_notify(submission, detect, guild)
+
+                    if should_notify:
+                        found_any_match = True
+                        await self._notify(guild, submission, detect)
+                        LOGGER.info("Notified for post %s in r/%s for guild %s", submission.id, sub_name, guild.id)
+
+                    # Mark as processed regardless
+                    await self._add_processed(guild, submission.id)
+
+                LOGGER.debug("Checked %d posts in r/%s for guild %s", posts_checked, sub_name, guild.id)
+
             except Exception:
-                pass
-            self._tasks.pop(guild.id, None)
-            LOGGER.info("Monitor stopped for guild %s", guild.id)
+                LOGGER.exception("Error processing subreddit %s for guild %s", sub_name, guild.id)
+
+        # Send debug message if no matches found and debug is enabled
+        if not found_any_match:
+            await self._send_debug_message(
+                guild,
+                f"✅ Reddit monitor is alive. Checked {total_posts_checked} posts across {len(subreddits)} subreddit(s). No matching posts found this cycle."
+            )
+
+    async def _cleanup_guild_task(self, guild_id: int):
+        """Clean up resources for a guild's monitoring task."""
+        # Remove task from tracking
+        self._tasks.pop(guild_id, None)
+
+        # Close reddit client
+        reddit_client = self._reddit_clients.pop(guild_id, None)
+        if reddit_client:
+            try:
+                await reddit_client.close()
+            except Exception:
+                LOGGER.exception("Error closing reddit client for guild %s", guild_id)
+
+        # Remove task lock
+        self._task_locks.pop(guild_id, None)
+
+        LOGGER.info("Cleanup completed for guild %s", guild_id)
 
     async def _ensure_task(self, guild: discord.Guild):
-        """Start monitoring task for a guild if enabled and not already running."""
-        if guild.id in self._tasks:
+        """Ensure a monitoring task is running for a guild (thread-safe)."""
+        if guild.id not in self._task_locks:
+            self._task_locks[guild.id] = asyncio.Lock()
+
+        async with self._task_locks[guild.id]:
+            # Check if task already exists and is healthy
+            existing_task = self._tasks.get(guild.id)
+            if existing_task and not existing_task.done():
+                LOGGER.debug("Task already running for guild %s", guild.id)
+                return
+
+            # Clean up any done task
+            if existing_task:
+                LOGGER.info("Cleaning up completed task for guild %s", guild.id)
+                await self._cleanup_guild_task(guild.id)
+
+            # Check if monitoring is enabled
+            enabled = await self.config.guild(guild).enabled()
+            if not enabled:
+                LOGGER.debug("Monitoring disabled for guild %s, not starting task", guild.id)
+                return
+
+            # Create new task
+            LOGGER.info("Creating new monitoring task for guild %s", guild.id)
+            task = self.bot.loop.create_task(self._monitor_guild(guild))
+            self._tasks[guild.id] = task
+
+    async def _stop_task(self, guild: discord.Guild):
+        """Stop monitoring task for a guild (thread-safe)."""
+        if guild.id not in self._task_locks:
             return
-        enabled = await self.config.guild(guild).enabled()
-        if not enabled:
-            return
-        task = self.bot.loop.create_task(self._monitor_guild(guild))
-        self._tasks[guild.id] = task
+
+        async with self._task_locks[guild.id]:
+            task = self._tasks.get(guild.id)
+            if task and not task.cancelled():
+                LOGGER.info("Stopping monitoring task for guild %s", guild.id)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            await self._cleanup_guild_task(guild.id)
 
     # ------------------------- Commands -------------------------
     @commands.group()
@@ -571,10 +689,7 @@ class RedditMonitor(commands.Cog):
     async def disable(self, ctx: commands.Context):
         """Disable monitoring for this guild."""
         await self.config.guild(ctx.guild).enabled.set(False)
-        # cancel running task if any
-        task = self._tasks.pop(ctx.guild.id, None)
-        if task:
-            task.cancel()
+        await self._stop_task(ctx.guild)
         await ctx.send("Monitoring disabled for this guild.")
 
     # Interval and threshold
@@ -690,17 +805,27 @@ class RedditMonitor(commands.Cog):
     async def checknow(self, ctx: commands.Context):
         """Run a manual check now in this guild."""
         await ctx.send("Running manual check...")
-        # run monitor once
-        # We create a short-lived task to run a single iteration by calling the monitor and cancelling after one loop.
-        async def short_run():
-            await self._monitor_guild(ctx.guild)
 
-        # start the task and cancel after a small delay if it doesn't return (monitor_guild is long-running)
-        task = self.bot.loop.create_task(short_run())
-        await asyncio.sleep(5)
-        if not task.done():
-            task.cancel()
-        await ctx.send("Manual check requested (background).")
+        try:
+            # Get Reddit client
+            reddit = await self._get_reddit(ctx.guild)
+            if reddit is None:
+                await ctx.send("❌ Reddit credentials not configured.")
+                return
+
+            # Get configuration
+            subs = await self.config.guild(ctx.guild).subreddits()
+            if not subs:
+                await ctx.send("❌ No subreddits configured.")
+                return
+
+            # Run one monitoring cycle
+            await self._monitor_subreddits(ctx.guild, reddit, subs)
+            await ctx.send("✅ Manual check completed.")
+
+        except Exception as e:
+            LOGGER.exception("Error during manual check")
+            await ctx.send(f"❌ Error during manual check: {str(e)}")
 
     @rmonitor.command(name="status")
     @commands.admin_or_permissions(manage_guild=True)
@@ -713,18 +838,47 @@ class RedditMonitor(commands.Cog):
         threshold = await self.config.guild(ctx.guild).threshold()
         maxp = await self.config.guild(ctx.guild).max_processed()
         kw = await self.config.guild(ctx.guild).keywords()
+        debug = await self.config.guild(ctx.guild).default_debug()
+
+        # Check task status
+        task = self._tasks.get(ctx.guild.id)
+        if task and not task.done():
+            task_status = "🟢 Running"
+        elif task and task.done():
+            task_status = "🔴 Stopped (task completed/failed)"
+        else:
+            task_status = "🔴 Not running"
 
         channel = ctx.guild.get_channel(channel_id) if channel_id else None
         lines = [
+            f"**Reddit Monitor Status**",
             f"Enabled: {enabled}",
+            f"Task Status: {task_status}",
             f"Channel: {channel.mention if channel else 'Not set'}",
             f"Subreddits: {', '.join(subs) if subs else 'None'}",
             f"Interval: {interval}s",
             f"Threshold: {threshold}",
+            f"Debug Mode: {debug}",
             f"Max processed stored: {maxp}",
             f"Keywords: higher={len(kw.get('higher') or [])}, normal={len(kw.get('normal') or [])}, lower={len(kw.get('lower') or [])}, negative={len(kw.get('negative') or [])}",
         ]
+
+        # Add Reddit credentials status (without revealing them)
+        creds = await self.config.guild(ctx.guild).reddit_client_id()
+        creds_status = "✅ Configured" if creds else "❌ Not configured"
+        lines.append(f"Reddit API: {creds_status}")
+
         await ctx.send("\n".join(lines))
+
+    @rmonitor.command(name="restart")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def restart(self, ctx: commands.Context):
+        """Restart the monitoring task for this guild."""
+        await ctx.send("Restarting monitoring task...")
+        await self._stop_task(ctx.guild)
+        await asyncio.sleep(1)  # Give it a moment to clean up
+        await self._ensure_task(ctx.guild)
+        await ctx.send("✅ Monitoring task restarted.")
 
     # Flair / category
     @rmonitor.command(name="setflair")
@@ -774,7 +928,7 @@ class RedditMonitor(commands.Cog):
         threshold = await self.config.guild(ctx.guild).threshold()
 
         try:
-            sub = reddit.subreddit(subreddit.strip().lstrip("r/"))
+            sub = await reddit.subreddit(subreddit.strip().lstrip("r/"))
             results = []
 
             async for submission in sub.new(limit=limit):
@@ -807,3 +961,69 @@ class RedditMonitor(commands.Cog):
 
         except Exception as e:
             await ctx.send(f"Error testing detection: {e}")
+
+    # Additional debugging commands
+    @rmonitor.command(name="taskinfo")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def taskinfo(self, ctx: commands.Context):
+        """Show detailed information about the monitoring task."""
+        task = self._tasks.get(ctx.guild.id)
+
+        if not task:
+            await ctx.send("❌ No monitoring task exists for this guild.")
+            return
+
+        lines = [
+            f"**Task Information for Guild {ctx.guild.id}**",
+            f"Task exists: ✅ Yes",
+            f"Task done: {'✅ Yes' if task.done() else '❌ No'}",
+            f"Task cancelled: {'✅ Yes' if task.cancelled() else '❌ No'}",
+        ]
+
+        if task.done():
+            try:
+                exception = task.exception()
+                if exception:
+                    lines.append(f"Exception: {type(exception).__name__}: {exception}")
+                else:
+                    lines.append("Completed normally")
+            except asyncio.InvalidStateError:
+                lines.append("Task state unknown")
+
+        # Show lock status
+        has_lock = ctx.guild.id in self._task_locks
+        lines.append(f"Has task lock: {'✅ Yes' if has_lock else '❌ No'}")
+
+        # Show reddit client status
+        has_reddit = ctx.guild.id in self._reddit_clients
+        lines.append(f"Has reddit client: {'✅ Yes' if has_reddit else '❌ No'}")
+
+        await ctx.send("\n".join(lines))
+
+    @rmonitor.command(name="cleartasks")
+    @commands.is_owner()
+    async def cleartasks(self, ctx: commands.Context):
+        """[Owner Only] Clear all monitoring tasks and restart them."""
+        await ctx.send("🔄 Clearing all monitoring tasks...")
+
+        # Cancel all tasks
+        tasks_cancelled = 0
+        for guild_id, task in list(self._tasks.items()):
+            if not task.cancelled():
+                task.cancel()
+                tasks_cancelled += 1
+
+        # Wait for cancellation
+        if tasks_cancelled > 0:
+            await asyncio.sleep(2)
+
+        # Clean up all guild tasks
+        guilds_cleaned = len(self._tasks)
+        for guild_id in list(self._tasks.keys()):
+            await self._cleanup_guild_task(guild_id)
+
+        await ctx.send(f"✅ Cleared {tasks_cancelled} tasks and cleaned up {guilds_cleaned} guilds.")
+
+        # Restart tasks for enabled guilds
+        await self._startup_tasks()
+        await ctx.send("✅ Restarted monitoring tasks for enabled guilds.")
