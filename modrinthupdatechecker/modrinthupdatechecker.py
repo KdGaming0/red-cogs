@@ -285,7 +285,9 @@ class ModrinthUpdateChecker(commands.Cog):
                 f"Set (or clear) the loader filter for **every** tracked mod.\n\n"
                 f"`{p}track set loader-channel <#channel> [loader]`\n"
                 f"Set (or clear) the loader filter for all mods in a channel. "
-                f"Pass no loader to remove filtering entirely (e.g. for a resource-pack channel)."
+                f"Pass no loader to remove filtering entirely (e.g. for a resource-pack channel).\n\n"
+                f"`{p}track set roles-channel <#channel> [@role...]`\n"
+                f"Set (or clear) ping roles for all mods in a channel."
             ),
             inline=False,
         )
@@ -664,6 +666,34 @@ class ModrinthUpdateChecker(commands.Cog):
             await ctx.send(f"\u2705 Loader filter set to `{loader.lower()}` for {len(affected)} mod(s) in {channel.mention}.")
         else:
             await ctx.send(f"\u2705 Loader filter cleared for {len(affected)} mod(s) in {channel.mention} (they will match any loader).")
+
+    @track_set.command(name="roles-channel")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def track_set_roles_channel(self, ctx: commands.Context, channel: discord.TextChannel, *roles: discord.Role):
+        """Set or clear ping roles for all mods posting to a specific channel.
+
+        Pass no roles to remove all pings for that channel's mods.
+
+        **Examples:**
+        `[p]track set roles-channel #updates @ModUpdates @Modded`
+        `[p]track set roles-channel #updates` — clears all pings for that channel
+        """
+        async with self.config.guild(ctx.guild).tracked() as tracked:
+            if not tracked:
+                await ctx.send("No mods are currently being tracked.")
+                return
+            affected = [pid for pid, e in tracked.items() if e["channel_id"] == channel.id]
+            if not affected:
+                await ctx.send(f"No mods are posting to {channel.mention}.")
+                return
+            for pid in affected:
+                tracked[pid]["roles"] = [r.id for r in roles]
+
+        if roles:
+            role_str = ", ".join(r.mention for r in roles)
+            await ctx.send(f"\u2705 Ping roles set to {role_str} for {len(affected)} mod(s) in {channel.mention}.")
+        else:
+            await ctx.send(f"\u2705 Ping roles cleared for {len(affected)} mod(s) in {channel.mention}.")
 
     @track_set.command(name="roles")
     @checks.admin_or_permissions(manage_guild=True)
