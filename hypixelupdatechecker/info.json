@@ -1,0 +1,12 @@
+{
+    "name": "HypixelUpdateChecker",
+    "short": "Posts new Hypixel SkyBlock updates to a Discord channel.",
+    "description": "Periodically scrapes the Hypixel forums for new SkyBlock patch notes, news, and alpha updates, then posts nicely formatted Discord embeds with a preview and a read-more link.",
+    "author": ["Kd_Gaming1"],
+    "install_msg": "Use `[p]hypixel setchannel #your-channel` to get started!",
+    "required_cogs": {},
+    "requirements": ["beautifulsoup4", "aiohttp"],
+    "tags": ["hypixel", "skyblock", "updates", "minecraft"],
+    "min_bot_version": "3.5.0",
+    "hidden": false
+}

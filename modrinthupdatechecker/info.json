@@ -1,0 +1,14 @@
+{
+  "name": "ModrinthUpdateChecker",
+  "short": "Track Modrinth mods and receive update notifications in Discord.",
+  "description": "Periodically polls the Modrinth API and posts rich embed notifications when a tracked mod releases a new version. Supports per-project Minecraft version filters, loader filters (Fabric, Forge, etc.), role pings, and configurable update channels.",
+  "tags": ["modrinth", "minecraft", "mods", "updates", "tracker"],
+  "requirements": ["aiohttp"],
+  "author": ["Kd_Gaming1"],
+  "install_msg": "Thanks for installing ModrinthUpdateChecker! Use `[p]track add <project_id> <channel>` to start tracking a mod.",
+  "min_bot_version": "3.5.0",
+  "min_python_version": [3, 8, 0],
+  "hidden": false,
+  "disabled": false,
+  "type": "COG"
+}
