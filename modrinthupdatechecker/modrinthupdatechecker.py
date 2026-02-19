@@ -8,10 +8,10 @@ from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
 
 MODRINTH_API = "https://api.modrinth.com/v2"
-USER_AGENT = "RedBot-ModrinthUpdateChecker/1.0.0 (github.com/KdGaming0/red-cogs)"
+USER_AGENT = "RedBot-ModrinthUpdateChecker/1.0.0 (github.com/your_username/modrinthupdatechecker)"
 VERSION_URL = "https://modrinth.com/mod/{project_id}/version/{version_id}"
 
-VALID_LOADERS = {"fabric", "forge", "quilt", "neoforge"}
+VALID_LOADERS = {"fabric", "forge", "quilt", "neoforge", "liteloader", "modloader", "rift", "minecraft"}
 
 
 class ModrinthUpdateChecker(commands.Cog):
@@ -23,7 +23,7 @@ class ModrinthUpdateChecker(commands.Cog):
 
         # Global defaults
         self.config.register_global(
-            check_interval=600,  # seconds (5 minutes)
+            check_interval=300,  # seconds (5 minutes)
             default_loader=None,  # e.g. "fabric"
         )
 
@@ -275,12 +275,17 @@ class ModrinthUpdateChecker(commands.Cog):
         )
 
         embed.add_field(
-            name="📢 Bulk MC Version  (`track set mc-…`)",
+            name="📢 Bulk Settings  (`track set …-all` / `…-channel`)",
             value=(
                 f"`{p}track set mc-all [versions...]`\n"
                 f"Set (or clear) the MC version filter for **every** tracked mod.\n\n"
                 f"`{p}track set mc-channel <#channel> [versions...]`\n"
-                f"Set (or clear) the MC version filter for all mods in a specific channel."
+                f"Set (or clear) the MC version filter for all mods in a specific channel.\n\n"
+                f"`{p}track set loader-all [loader]`\n"
+                f"Set (or clear) the loader filter for **every** tracked mod.\n\n"
+                f"`{p}track set loader-channel <#channel> [loader]`\n"
+                f"Set (or clear) the loader filter for all mods in a channel. "
+                f"Pass no loader to remove filtering entirely (e.g. for a resource-pack channel)."
             ),
             inline=False,
         )
@@ -451,27 +456,38 @@ class ModrinthUpdateChecker(commands.Cog):
             await ctx.send("No mods are currently being tracked.")
             return
 
-        embed = discord.Embed(title="Tracked Mods", color=0x1BD96A)
-        for project_id, entry in tracked.items():
-            channel = ctx.guild.get_channel(entry["channel_id"])
-            channel_str = channel.mention if channel else f"<deleted channel {entry['channel_id']}>"
-            loader = entry.get("loader") or "—"
-            mc = ", ".join(entry.get("mc_versions") or []) or "Any"
-            roles = ", ".join(f"<@&{r}>" for r in entry.get("roles", [])) or "None"
+        items = list(tracked.items())
+        total = len(items)
+        # Cap at 10 per embed to stay well clear of Discord's 25-field limit
+        page_size = 10
+        pages = [items[i:i + page_size] for i in range(0, total, page_size)]
+        total_pages = len(pages)
 
-            value = (
-                f"**Channel:** {channel_str}\n"
-                f"**Loader:** {loader}\n"
-                f"**MC Versions:** {mc}\n"
-                f"**Ping Roles:** {roles}"
+        for page_num, page in enumerate(pages, start=1):
+            title = (
+                f"Tracked Mods ({total} total)"
+                if total_pages == 1
+                else f"Tracked Mods — Page {page_num}/{total_pages} ({total} total)"
             )
-            embed.add_field(
-                name=f"{entry.get('project_name', project_id)} (`{project_id}`)",
-                value=value,
-                inline=False,
-            )
-
-        await ctx.send(embed=embed)
+            embed = discord.Embed(title=title, color=0x1BD96A)
+            for project_id, entry in page:
+                channel = ctx.guild.get_channel(entry["channel_id"])
+                channel_str = channel.mention if channel else f"<deleted channel {entry['channel_id']}>"
+                loader = entry.get("loader") or "—"
+                mc = ", ".join(entry.get("mc_versions") or []) or "Any"
+                roles = ", ".join(f"<@&{r}>" for r in entry.get("roles", [])) or "None"
+                value = (
+                    f"**Channel:** {channel_str}\n"
+                    f"**Loader:** {loader}\n"
+                    f"**MC Versions:** {mc}\n"
+                    f"**Ping Roles:** {roles}"
+                )
+                embed.add_field(
+                    name=f"{entry.get('project_name', project_id)} (`{project_id}`)",
+                    value=value,
+                    inline=False,
+                )
+            await ctx.send(embed=embed)
 
     # ── track set ──────────────────────────────
 
@@ -589,6 +605,65 @@ class ModrinthUpdateChecker(commands.Cog):
             await ctx.send(f"✅ MC version filter set to `{', '.join(versions)}` for {len(affected)} mod(s) in {channel.mention}.")
         else:
             await ctx.send(f"✅ MC version filter cleared for {len(affected)} mod(s) in {channel.mention}.")
+
+    @track_set.command(name="loader-all")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def track_set_loader_all(self, ctx: commands.Context, loader: Optional[str] = None):
+        """Set or clear the loader filter for ALL tracked mods at once.
+
+        Pass no loader to clear the per-project filter on all mods
+        (they will then fall back to the server default, or any loader).
+
+        **Examples:**
+        `[p]track set loader-all fabric`
+        `[p]track set loader-all` — clears loader filter on everything
+        """
+        if loader and loader.lower() not in VALID_LOADERS:
+            await ctx.send(f"\u274c `{loader}` is not a recognised loader. Valid: {', '.join(sorted(VALID_LOADERS))}")
+            return
+        async with self.config.guild(ctx.guild).tracked() as tracked:
+            if not tracked:
+                await ctx.send("No mods are currently being tracked.")
+                return
+            for project_id in tracked:
+                tracked[project_id]["loader"] = loader.lower() if loader else None
+            count = len(tracked)
+
+        if loader:
+            await ctx.send(f"\u2705 Loader filter set to `{loader.lower()}` for all {count} tracked mod(s).")
+        else:
+            await ctx.send(f"\u2705 Loader filter cleared for all {count} tracked mod(s) (falling back to server default or any).")
+
+    @track_set.command(name="loader-channel")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def track_set_loader_channel(self, ctx: commands.Context, channel: discord.TextChannel, loader: Optional[str] = None):
+        """Set or clear the loader filter for all mods in a specific channel.
+
+        Pass no loader to clear the filter for those mods.
+        Useful for e.g. a resource-pack channel where loader filtering is not needed.
+
+        **Examples:**
+        `[p]track set loader-channel #resourcepacks` — clears loader filter for that channel
+        `[p]track set loader-channel #mods fabric`
+        """
+        if loader and loader.lower() not in VALID_LOADERS:
+            await ctx.send(f"\u274c `{loader}` is not a recognised loader. Valid: {', '.join(sorted(VALID_LOADERS))}")
+            return
+        async with self.config.guild(ctx.guild).tracked() as tracked:
+            if not tracked:
+                await ctx.send("No mods are currently being tracked.")
+                return
+            affected = [pid for pid, e in tracked.items() if e["channel_id"] == channel.id]
+            if not affected:
+                await ctx.send(f"No mods are posting to {channel.mention}.")
+                return
+            for pid in affected:
+                tracked[pid]["loader"] = loader.lower() if loader else None
+
+        if loader:
+            await ctx.send(f"\u2705 Loader filter set to `{loader.lower()}` for {len(affected)} mod(s) in {channel.mention}.")
+        else:
+            await ctx.send(f"\u2705 Loader filter cleared for {len(affected)} mod(s) in {channel.mention} (they will match any loader).")
 
     @track_set.command(name="roles")
     @checks.admin_or_permissions(manage_guild=True)
