@@ -38,6 +38,13 @@ DEFAULT_THRESHOLD = 3.0
 DEFAULT_MAX_PROCESSED = 1000
 
 # ── Default keyword lists ─────────────────────────────────────────────────────
+#
+# TIER PHILOSOPHY
+# ───────────────
+# higher  → bypass threshold entirely (exact mod/tool names you specifically support)
+# normal  → must be mod-specific; generic words like "bug" or "lag" do NOT belong here
+# lower   → generic technical words that are weak signals on their own
+# negative → game content / economy terms that indicate a non-mod post
 DEFAULT_KEYWORDS: Dict[str, List[str]] = {
     # Immediate-trigger keywords (bypass threshold check entirely)
     "higher": [
@@ -46,13 +53,22 @@ DEFAULT_KEYWORDS: Dict[str, List[str]] = {
         "packcore", "scale me", "scaleme",
     ],
 
-    # Core signal keywords — scored highest
+    # Normal keywords — mod names, loaders, and general tech-help vocabulary.
+    # The expanded negative list handles false positives; don't over-restrict here.
     "normal": [
-        # Mod tooling
-        "mod", "mods", "modpack", "modpacks",
-        "forge", "fabric",
-        "configs", "config",
-        "1.21.5", "1.21.8", "1.21.10", "1.21.11", "26.1", "26.2"
+        # Mod loaders / build tools
+        "forge", "fabric", "modpack", "modpacks",
+        "configs", "config", "configuration",
+        "modrinth",
+        "1.21.5", "1.21.8", "1.21.10", "1.21.11", "26.1", "26.2",
+
+        # Generic modding terms
+        "mod", "mods", "modded", "modding",
+        "modification", "loader", "addon", "plugin",
+        "skyblock addons", "not enough updates",
+        "texture pack", "resource pack",
+        "shader", "shaders", "optifine",
+        "optimization", "optimize", "tweak", "utility",
 
         # 1.21+ SkyBlock mods
         "firmament", "skyblock tweaks", "modern warp menu",
@@ -89,57 +105,85 @@ DEFAULT_KEYWORDS: Dict[str, List[str]] = {
         "ladymod", "laby", "badlion", "lunar", "essential",
         "lunarclient", "feather",
 
-        # Performance / hardware problems
-        "fps boost", "fps drop", "frame drop",
-        "low fps", "bad performance", "stuttering",
-        "freezing", "crash", "crashing",
-        "memory leak", "high ram", "high cpu", "high gpu",
+        # Performance problems
+        "fps boost", "fps drop", "frame drop", "low fps", "bad performance",
+        "stuttering", "choppy", "frames", "frame rate",
+        "performance", "fps", "lag",
+        "memory", "ram", "cpu", "gpu", "graphics",
 
-        # Technical issues
-        "not working", "won't launch", "won't open",
-        "install", "installation", "mod setup",
-        "how to install", "install mod",
-        "java error", "java crash",
-        "error", "bug", "glitch",
-        "compatibility issue",
-    ],
+        # Technical problem words
+        "bug", "error", "glitch", "crash", "crashing",
+        "freezing", "not working", "broken",
+        "fix", "troubleshoot",
+        "install", "installation", "setup",
+        "configure", "compatibility",
 
-    # Weaker signal keywords
-    "lower": [
-        "modification", "skyblock addons", "not enough updates",
-        "texture pack", "resource pack",
-        "shader", "shaders", "optifine",
-        "optimization", "optimize",
-        "modding", "modded", "loader",
-        "addon", "plugin",
-        "enhancement", "tweak", "utility",
-        "performance", "lag", "fix", "troubleshoot",
-        "setup", "configure", "configuration",
+        # Mod-specific install / crash phrases
+        "install mod", "mod installation", "how to install mod",
+        "mod not loading", "mod not working", "mods not loading",
+        "mod crashing", "mod crash", "client crash",
+        "mod conflict", "mod incompatible",
+        "java crash", "java error", "memory leak",
+
+        # Platform / runtime
         "java", "minecraft", "windows", "linux",
-        "ram", "cpu", "gpu", "graphics", "memory",
-        "frames", "fps",
     ],
 
-    # Penalise economy / game-content posts
+    # Lower tier — intentionally empty; add very weak signals here if needed
+    "lower": [],
+
+    # Penalise game-content posts — these are almost never mod-related
     "negative": [
-        "minion", "coins", "dungeon master",
-        "catacombs", "slayer", "dragon",
+        # Economy / trading
         "auction house", "bazaar", "trading",
-        "selling", "buying", "worth",
-        "price", "price check",
-        "collection", "skill level", "enchanting",
-        "reforge", "talisman", "accessory",
-        "weapon", "armor", "pet",
-        "farming coins", "money making",
+        "selling", "buying", "worth", "price check",
+        "price", "coins", "bits",
+        "money making", "farming coins",
+
+        # Game progression / gear
+        "minion", "dungeon master", "catacombs", "slayer", "dragon",
+        "collection", "skill", "enchanting", "reforge",
+        "talisman", "accessory", "weapon", "armor", "pet",
+        "bestiary", "crimson isle", "kuudra",
+
+        # Farming / garden game content
+        "crop", "crops", "crop fever", "farming",
+        "greenhouse", "garden", "mutation", "mutations",
+        "dicer", "melon dicer", "visitor", "compost",
+        "plot", "plots", "jacob", "pest",
+
+        # World / exploration content
+        "foraging", "foraging island", "jungle island", "mining island",
+        "rift", "living cave", "autocap", "autonull",
+        "dwarven mines", "crystal hollows", "deep caverns",
+        "spider's den", "blazing fortress",
+        "new profile", "profile",
+
+        # Fishing content
+        "fishing", "trophy fish", "lava fishing",
+
+        # Combat / boss content
+        "dungeon", "floor", "boss", "mob", "monster",
+        "damage", "effective hp", "ehp", "dps",
     ],
 }
 
-# Patterns that strongly suggest a false positive
+# Patterns that strongly indicate game-content (not mod-related) posts
 FALSE_POSITIVE_PATTERNS = [
+    # Economy / trading language
     re.compile(r'\b(selling|buying|trade|auction|price\s*check|worth)\b', re.I),
     re.compile(r'\b(looking\s*for|want\s*to\s*buy|WTB|WTS)\b', re.I),
     re.compile(r'\b(what.{0,20}worth|how\s+much|value)\b', re.I),
-    re.compile(r'\b(collection|skill).{0,30}\b(boost|farm)\b', re.I),
+    # Farming / crop game content
+    re.compile(r'\b(crop|crops|greenhouse|mutation|mutations|farming|harvest|garden|dicer|compost|visitor|jacob)\b', re.I),
+    # World / area exploration
+    re.compile(r'\b(foraging\s+island|jungle\s+island|rift\s+(?!client)|living\s+cave|dwarven|crystal\s+hollow)\b', re.I),
+    # Profile / game mechanic talk
+    re.compile(r'\b(new\s+profile|fresh\s+profile|my\s+profile|profile\s+reset)\b', re.I),
+    # Boss / dungeon game content
+    re.compile(r'\b(dungeon\s+(?:run|floor|room)|slayer\s+(?:quest|boss)|dragon\s+(?:eye|armor|fight))\b', re.I),
+    # Skill / level game content
+    re.compile(r'\b(skill\s+(?:level|cap|xp|exp)|collection\s+(?:level|req))\b', re.I),
 ]
 
 # Context patterns that raise confidence (+0.5 each, capped at +2.0)
@@ -333,15 +377,18 @@ class RedditMonitor(commands.Cog):
         body     = getattr(submission, "selftext", "").lower()
         combined = f"{title} {body}"
 
+        # Too many negative indicators relative to positive
         neg = len(detect["matches"]["negative"])
         pos = len(detect["matches"]["normal"]) + len(detect["matches"]["lower"])
-        if neg >= pos and neg > 2:
+        if neg >= pos and neg > 1:
             return False
 
+        # False-positive content patterns
         for pat in FALSE_POSITIVE_PATTERNS:
             if pat.search(combined):
                 return False
 
+        # Borderline score: require at least some normal-tier match + context signal
         if detect["score"] < threshold + 1.5:
             if not detect["matches"]["normal"] and detect["context_boost"] < 1.0:
                 return False
