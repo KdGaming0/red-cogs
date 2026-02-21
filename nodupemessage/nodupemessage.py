@@ -21,7 +21,7 @@ IGNORED_CONTENT = {
 MIN_LENGTH = 4
 
 
-class NoDupeMessage(commands.Cog):
+class NoDuppMessage(commands.Cog):
     """Detects and removes duplicate messages sent across multiple channels."""
 
     def __init__(self, bot):
@@ -33,6 +33,7 @@ class NoDupeMessage(commands.Cog):
             mute_threshold=3,     # violations before a timeout is issued
             mute_duration=300,    # timeout duration in seconds
             enabled=True,
+            exempt_roles=[],      # role IDs exempt from the filter
         )
 
         # {guild_id: {user_id: deque[(content_hash, monotonic_time, channel_id)]}}
@@ -98,6 +99,12 @@ class NoDupeMessage(commands.Cog):
         settings = await self.config.guild(message.guild).all()
         if not settings["enabled"]:
             return
+
+        # Skip users who have an exempt role
+        if settings["exempt_roles"]:
+            member_role_ids = {r.id for r in message.author.roles}
+            if member_role_ids & set(settings["exempt_roles"]):
+                return
 
         now = time.monotonic()
         window = settings["time_window"]
@@ -219,6 +226,34 @@ class NoDupeMessage(commands.Cog):
         await self.config.guild(ctx.guild).mute_duration.set(seconds)
         await ctx.send(f"🔇 Mute duration set to **{humanize_timedelta(seconds=seconds)}**.")
 
+    @nodupe.command(name="exemptadd")
+    async def nodupe_exemptadd(self, ctx, role: discord.Role):
+        """Add a role to the exempt list (members with this role are ignored)."""
+        async with self.config.guild(ctx.guild).exempt_roles() as exempt:
+            if role.id in exempt:
+                return await ctx.send(f"**{role.name}** is already exempt.")
+            exempt.append(role.id)
+        await ctx.send(f"✅ **{role.name}** added to exempt roles.")
+
+    @nodupe.command(name="exemptremove")
+    async def nodupe_exemptremove(self, ctx, role: discord.Role):
+        """Remove a role from the exempt list."""
+        async with self.config.guild(ctx.guild).exempt_roles() as exempt:
+            if role.id not in exempt:
+                return await ctx.send(f"**{role.name}** is not in the exempt list.")
+            exempt.remove(role.id)
+        await ctx.send(f"🗑 **{role.name}** removed from exempt roles.")
+
+    @nodupe.command(name="exemptlist")
+    async def nodupe_exemptlist(self, ctx):
+        """List all exempt roles."""
+        exempt_ids = await self.config.guild(ctx.guild).exempt_roles()
+        if not exempt_ids:
+            return await ctx.send("No roles are currently exempt.")
+        roles = [ctx.guild.get_role(rid) for rid in exempt_ids]
+        role_names = [r.mention if r else f"(deleted role {rid})" for r, rid in zip(roles, exempt_ids)]
+        await ctx.send("**Exempt roles:** " + ", ".join(role_names))
+
     @nodupe.command(name="settings")
     async def nodupe_settings(self, ctx):
         """Show the current configuration."""
@@ -232,4 +267,10 @@ class NoDupeMessage(commands.Cog):
             value=humanize_timedelta(seconds=s["mute_duration"]),
             inline=True,
         )
+        if s["exempt_roles"]:
+            roles = [ctx.guild.get_role(rid) for rid in s["exempt_roles"]]
+            role_names = [r.name if r else f"(deleted {rid})" for r, rid in zip(roles, s["exempt_roles"])]
+            embed.add_field(name="Exempt Roles", value=", ".join(role_names), inline=False)
+        else:
+            embed.add_field(name="Exempt Roles", value="None", inline=False)
         await ctx.send(embed=embed)
