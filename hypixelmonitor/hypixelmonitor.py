@@ -1,6 +1,22 @@
+"""
+HypixelMonitor — RedBot cog
+Scrapes Hypixel forum categories for mod / tech-support threads and posts
+Discord embeds to a configured channel.
+
+Detection tiers
+  higher   → immediate notify regardless of threshold (VIP keywords, exact names)
+  normal   → +2.0 per single word, +3.0 per phrase
+  lower    → +1.0 per single word, +1.5 per phrase
+  negative → -2.0 per single word, -2.5 per phrase  (game-economy terms)
+
+Context boost (+0.5 each, capped at +2.0): help-seeking language, tech terms, question patterns.
+Title hits are worth 2× their normal score.
+"""
+
 import asyncio
-import re
+import json
 import logging
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -14,1085 +30,1091 @@ import discord
 
 LOGGER = logging.getLogger("red.hypixelmonitor")
 
-# Unique identifier for Config.get_conf. Change if you fork the cog.
-CONF_ID = 0x5b4c3d2e
+# ── Config identifier (change if you fork) ──────────────────────────────────
+CONF_ID = 0x5B4C3D2E
 
-# Default limits
+# ── Limits ───────────────────────────────────────────────────────────────────
 MIN_INTERVAL = 60
-DEFAULT_INTERVAL = 900
-DEFAULT_THRESHOLD = 3.0
-DEFAULT_MAX_PROCESSED = 1000
+DEFAULT_INTERVAL = 900       # 15 minutes
+DEFAULT_THRESHOLD = 3.0      # minimum score to trigger a notify
+DEFAULT_MAX_PROCESSED = 1000  # rolling window of seen thread IDs
 
-DEFAULT_KEYWORDS = {
+# ── Default keyword lists ─────────────────────────────────────────────────────
+# Edit freely — these are only applied when you run `loaddefaults` or `quicksetup`.
+DEFAULT_KEYWORDS: Dict[str, List[str]] = {
+    # Immediate-trigger keywords (bypass threshold check entirely)
     "higher": [
-        # Special high-priority keywords that should trigger immediately
-        "skyblock enhanced", "sb enhanced", "kd_gaming1", "kdgaming1", "kdgaming", "packcore", "scale me", "scaleme"
+        "skyblock enhanced", "sb enhanced",
+        "kd_gaming1", "kdgaming1", "kdgaming",
+        "packcore", "scale me", "scaleme", "skyBlock enhancements",
     ],
+
+    # Core signal keywords — scored highest
     "normal": [
-        # Core mod terms
-        "mod", "mods", "modpack", "modpacks", "forge", "fabric", "configs", "config", "1.21.5", "1.21.8",
+        # Mod tooling
+        "mod", "mods", "modpack", "modpacks",
+        "forge", "fabric",
+        "configs", "config",
+        "1.21.5", "1.21.8", "1.21.10", "1.21.11", "26.1", "26.2",
 
-        # 1.21+ Skyblock Mods
-        "firmament", "skyblock tweaks", "modern warp menu", "skyblockaddons unofficial",
-        "skyhanni", "hypixel mod api", "skyocean", "skyblock profile viewer", "bazaar utils",
-        "skyblocker", "cookies-mod", "aaron's mod", "custom scoreboard", "skycubed",
-        "nofrills", "nobaaddons", "sky cubed", "dulkirmod", "skyblock 21", "skycofl",
+        # 1.21+ SkyBlock mods
+        "firmament", "skyblock tweaks", "modern warp menu",
+        "skyblockaddons unofficial", "skyhanni", "hypixel mod api",
+        "skyocean", "skyblock profile viewer", "bazaar utils",
+        "skyblocker", "cookies-mod", "aaron's mod",
+        "custom scoreboard", "skycubed", "nofrills",
+        "nobaaddons", "sky cubed", "dulkirmod",
+        "skyblock 21", "skycofl",
 
-        # 1.8.9 Skyblock Mods
-        "notenoughupdates", "neu", "polysprint", "skyblockaddons", "sba", "polypatcher",
-        "hypixel plus", "furfsky", "dungeons guide", "skyguide", "partly sane skies",
+        # 1.8.9 SkyBlock mods
+        "notenoughupdates", "neu", "polysprint",
+        "skyblockaddons", "sba", "polypatcher",
+        "hypixel plus", "furfsky", "dungeons guide",
+        "skyguide", "partly sane skies",
         "secret routes mod", "skytils",
 
-        # Performance Mods
-        "more culling", "badoptimizations", "concurrent chunk management", "very many players",
-        "threadtweak", "scalablelux", "particle core", "sodium", "lithium", "iris",
+        # Performance mods
+        "more culling", "badoptimizations",
+        "concurrent chunk management", "very many players",
+        "threadtweak", "scalablelux", "particle core",
+        "sodium", "lithium", "iris",
         "entity culling", "ferritecore", "immediatelyfast",
 
-        # QoL Mods
-        "scrollable tooltips", "fzzy config", "no chat reports", "no resource pack warnings",
-        "auth me", "betterf3", "scale me", "packcore", "no double sneak", "centered crosshair",
-        "continuity", "3d skin layers", "wavey capes", "sound controller", "cubes without borders",
-        "sodium shadowy path blocks",
+        # QoL mods
+        "scrollable tooltips", "fzzy config",
+        "no chat reports", "no resource pack warnings",
+        "auth me", "betterf3", "no double sneak",
+        "centered crosshair", "continuity", "3d skin layers",
+        "wavey capes", "sound controller",
+        "cubes without borders", "sodium shadowy path blocks",
 
-        # Popular Clients/Launchers
-        "ladymod", "laby", "badlion", "lunar", "essential", "lunarclient", "client", "feather",
+        # Popular clients / launchers
+        "ladymod", "laby", "badlion", "lunar", "essential",
+        "lunarclient", "feather",
 
-        # Performance issues
-        "fps boost", "performance", "lag", "frames", "frame rate", "fps", "stuttering",
-        "freezing", "crash", "crashing", "memory", "ram", "cpu", "gpu", "graphics",
-        "low fps", "bad performance", "slow", "choppy", "frame drops",
+        # Performance / hardware problems
+        "fps boost", "fps drop", "frame drop",
+        "low fps", "bad performance", "stuttering",
+        "freezing", "crash", "crashing",
+        "memory leak", "high ram", "high cpu", "high gpu",
 
-        # PC/Technical problems
-        "pc problem", "computer issue", "technical issue", "troubleshoot", "fix",
-        "error", "bug", "glitch", "not working", "broken", "install", "installation",
-        "setup", "configure", "configuration", "compatibility", "java", "minecraft", "windows", "linux",
-
-        # Installation/setup
-        "install mod", "mod installation", "how to install", "mod setup"
+        # Technical issues
+        "not working", "won't launch", "won't open",
+        "install", "installation", "mod setup",
+        "how to install", "install mod",
+        "java error", "java crash",
+        "error", "bug", "glitch",
+        "compatibility issue",
     ],
+
+    # Weaker signal keywords
     "lower": [
-        # Technical terms
-        "modification", "skyblock addons", "not enough updates", "texture pack", "resource pack",
-        "shader", "shaders", "optifine", "optimization", "optimize",
-
-        # Modding terms
-        "modding", "modded", "loader", "api", "addon", "plugin",
-        "enhancement", "tweak", "utility", "tool", "helper"
+        "modification", "skyblock addons", "not enough updates",
+        "texture pack", "resource pack",
+        "shader", "shaders", "optifine",
+        "optimization", "optimize",
+        "modding", "modded", "loader",
+        "addon", "plugin",
+        "enhancement", "tweak", "utility",
+        "performance", "lag", "fix", "troubleshoot",
+        "setup", "configure", "configuration",
+        "java", "minecraft", "windows", "linux",
+        "ram", "cpu", "gpu", "graphics", "memory",
+        "frames", "fps",
     ],
+
+    # Penalise economy / game-content posts (almost certainly not mod help)
     "negative": [
-        # Strong game content indicators
-        "minion", "coins", "dungeon master", "catacombs", "slayer", "dragon",
-        "auction house", "bazaar", "trading", "selling", "buying", "worth",
-        "price", "collection", "skill", "enchanting", "reforge", "talisman",
-        "accessory", "weapon", "armor", "pet", "farming coins", "money making"
-    ]
+        "minion", "coins", "dungeon master",
+        "catacombs", "slayer", "dragon",
+        "auction house", "bazaar", "trading",
+        "selling", "buying", "worth",
+        "price", "price check",
+        "collection", "skill level", "enchanting",
+        "reforge", "talisman", "accessory",
+        "weapon", "armor", "pet",
+        "farming coins", "money making",
+    ],
 }
 
 DEFAULT_FORUM_CATEGORIES = [
-    {
-        "url": "https://hypixel.net/forums/skyblock.157/",
-        "name": "SkyBlock General"
-    },
-    {
-        "url": "https://hypixel.net/forums/skyblock-community-help.196/",
-        "name": "SkyBlock Community Help"
-    }
+    {"url": "https://hypixel.net/forums/skyblock.157/",           "name": "SkyBlock General"},
+    {"url": "https://hypixel.net/forums/skyblock-community-help.196/", "name": "SkyBlock Community Help"},
+]
+
+# Patterns that strongly suggest a false positive (economy / trading posts)
+FALSE_POSITIVE_PATTERNS = [
+    re.compile(r'\b(selling|buying|trade|auction|price\s*check|worth)\b', re.I),
+    re.compile(r'\b(looking\s*for|want\s*to\s*buy|WTB|WTS)\b', re.I),
+    re.compile(r'\b(what.{0,20}worth|how\s+much|value)\b', re.I),
+    re.compile(r'\b(collection|skill).{0,30}\b(boost|farm)\b', re.I),
+]
+
+# Context patterns that raise confidence (each hit +0.5, capped at +2.0)
+CONTEXT_PATTERNS = [
+    re.compile(r'\b(help|issue|problem|crash|fix|install|setup|configure)\b', re.I),
+    re.compile(r"\b(not\s+working|broken|won'?t\s+work|can'?t\s+get|having\s+trouble)\b", re.I),
+    re.compile(r'\b(fps|performance|lag|optimization|memory|ram|java)\b', re.I),
+    re.compile(r'\b(how\s+do\s+i|how\s+to|anyone\s+know|can\s+someone|need\s+help|please\s+help)\b', re.I),
+    re.compile(r'\?', re.I),   # question marks are a strong signal
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 class HypixelMonitor(commands.Cog):
-    """Monitor Hypixel Forums for mod-related questions and technical help requests.
+    """Monitor Hypixel Forums for mod-related questions and technical help.
 
-    Detection uses keyword lists divided into higher (immediate), normal, lower, and negative.
+    Detection uses keyword tiers: higher (immediate), normal, lower, negative.
+    Run ``[p]hmonitor quicksetup #channel`` to get started.
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=CONF_ID, force_registration=True)
 
-        # Guild defaults
         default_guild = {
             "enabled": False,
             "notify_channel_id": None,
             "forum_categories": DEFAULT_FORUM_CATEGORIES,
             "interval": DEFAULT_INTERVAL,
             "threshold": DEFAULT_THRESHOLD,
-            "keywords": {
-                "higher": [],
-                "normal": [],
-                "lower": [],
-                "negative": [],
-            },
+            "keywords": {"higher": [], "normal": [], "lower": [], "negative": []},
             "processed_ids": [],
             "max_processed": DEFAULT_MAX_PROCESSED,
-            "default_debug": False,
+            "debug": False,
         }
-
         self.config.register_guild(**default_guild)
 
-        # runtime state - improved task management
-        self._tasks: Dict[int, asyncio.Task] = {}  # guild_id -> task
-        self._sessions: Dict[int, aiohttp.ClientSession] = {}  # guild_id -> session
-        self._task_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> lock for task creation
-        self._global_lock = asyncio.Lock()
+        # Per-guild async state
+        self._tasks:       Dict[int, asyncio.Task]       = {}
+        self._sessions:    Dict[int, aiohttp.ClientSession] = {}
+        self._task_locks:  Dict[int, asyncio.Lock]       = {}
+        # Per-guild lock for processed-ID writes (avoids a global bottleneck)
+        self._proc_locks:  Dict[int, asyncio.Lock]       = {}
 
-        # User agent for web requests
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        self._ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        )
 
+    # ── Lifecycle ────────────────────────────────────────────────────────────
     async def cog_load(self) -> None:
-        """Start monitoring tasks for all enabled guilds when the cog loads."""
         await self._startup_tasks()
 
-    async def _startup_tasks(self):
-        """Start monitoring tasks for all guilds that have monitoring enabled."""
-        try:
-            all_guilds = await self.config.all_guilds()
-            for guild_id, guild_config in all_guilds.items():
-                if guild_config.get("enabled", False):
-                    guild = self.bot.get_guild(guild_id)
-                    if guild:
-                        await self._ensure_task(guild)
-                        LOGGER.info("Started monitoring task for guild %s on cog load", guild_id)
-        except Exception:
-            LOGGER.exception("Error during startup task creation")
-
     async def cog_unload(self) -> None:
-        """Clean shutdown of all monitoring tasks."""
-        LOGGER.info("Shutting down HypixelMonitor cog...")
-
-        # Cancel all monitoring tasks
-        tasks_to_cancel = list(self._tasks.values())
-        for task in tasks_to_cancel:
-            if not task.cancelled():
-                task.cancel()
-
-        # Wait for tasks to finish cancelling
-        if tasks_to_cancel:
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-
+        LOGGER.info("Shutting down HypixelMonitor…")
+        tasks = list(self._tasks.values())
+        for t in tasks:
+            if not t.cancelled():
+                t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
-
-        # Cleanup aiohttp sessions
-        sessions_to_close = list(self._sessions.values())
-        for session in sessions_to_close:
-            try:
-                await session.close()
-            except Exception:
-                LOGGER.exception("Error closing aiohttp session")
-
+        for s in self._sessions.values():
+            await s.close()
         self._sessions.clear()
         self._task_locks.clear()
-        LOGGER.info("HypixelMonitor cog shutdown complete")
+        self._proc_locks.clear()
 
-    # ------------------------- Helpers -------------------------
-    async def _get_session(self, guild: discord.Guild) -> aiohttp.ClientSession:
-        """Get or create an aiohttp session for the guild."""
-        if guild.id in self._sessions and not self._sessions[guild.id].closed:
-            return self._sessions[guild.id]
-
+    async def _startup_tasks(self):
         try:
-            session = aiohttp.ClientSession(
-                headers={"User-Agent": self.user_agent},
-                timeout=aiohttp.ClientTimeout(total=30)
-            )
-            self._sessions[guild.id] = session
-            return session
-        except Exception as e:
-            LOGGER.exception("Failed to create aiohttp session: %s", e)
-            raise
+            for guild_id, cfg in (await self.config.all_guilds()).items():
+                if cfg.get("enabled"):
+                    g = self.bot.get_guild(guild_id)
+                    if g:
+                        await self._ensure_task(g)
+        except Exception:
+            LOGGER.exception("Error during startup")
 
-    def _match_score(self, title: str, body: str, keywords: dict) -> Dict:
-        """Enhanced detection with context scoring and phrase matching."""
+    # ── Session helper ────────────────────────────────────────────────────────
+    async def _get_session(self, guild: discord.Guild) -> aiohttp.ClientSession:
+        s = self._sessions.get(guild.id)
+        if s and not s.closed:
+            return s
+        s = aiohttp.ClientSession(
+            headers={"User-Agent": self._ua},
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
+        self._sessions[guild.id] = s
+        return s
+
+    # ── Detection ─────────────────────────────────────────────────────────────
+    @staticmethod
+    def _score_text(
+        title: str,
+        body: str,
+        keywords: Dict[str, List[str]],
+    ) -> Dict:
+        """
+        Score a post against keyword tiers.
+
+        Returns:
+            immediate (bool): True if any "higher" keyword matched.
+            score     (float): Aggregate relevance score.
+            matches   (dict):  {tier: [matched keywords]}
+            breakdown (dict):  Scoring detail for debugging.
+        """
+        title_l = title.lower()
+        body_l  = body.lower()
+        combined = f"{title_l}\n{body_l}"
+
+        matches   = {"higher": [], "normal": [], "lower": [], "negative": []}
+        breakdown = {}   # keyword → (tier, points_awarded)
+
+        # ── Tier weights ─────────────────────────────────────────────────────
+        # (title_score, body_score)  for single-word / phrase
+        TIER_WEIGHT = {
+            "higher":   (0,    0),     # just flips `immediate` flag
+            "normal":   (6.0,  3.0),   # phrase; single-word = half
+            "lower":    (3.0,  1.5),
+            "negative": (-4.0, -2.0),
+        }
+        # For single-word keywords, we use half the phrase weight
+        SINGLE_DIVISOR = 2.0
+
         score = 0.0
-        matches = {"higher": [], "normal": [], "lower": [], "negative": []}
-
-        # Preprocess text
-        title_lower = title.lower()
-        body_lower = body.lower()
-        combined_text = f"{title_lower}\n{body_lower}"
-
-        # Context indicators that boost confidence
-        tech_context_patterns = [
-            r'\b(help|issue|problem|error|crash|fix|install|setup|configure)\b',
-            r'\b(not working|broken|won\'t work|can\'t get|having trouble)\b',
-            r'\b(fps|performance|lag|optimization|memory|ram)\b'
-        ]
-
-        context_boost = 0
-        for pattern in tech_context_patterns:
-            if re.search(pattern, combined_text):
-                context_boost += 0.5
-
-        # Enhanced matching with phrase detection
-        for level in ["higher", "normal", "lower", "negative"]:
-            level_keywords = keywords.get(level, [])
-
-            for keyword in level_keywords:
-                keyword_lower = keyword.lower()
-
-                # Exact phrase matching for multi-word keywords
-                if ' ' in keyword_lower:
-                    if keyword_lower in combined_text:
-                        matches[level].append(keyword)
-                        if level == "normal":
-                            score += 3.0  # Higher score for exact phrases
-                        elif level == "lower":
-                            score += 1.5
-                        elif level == "negative":
-                            score -= 2.5
+        for tier in ("higher", "normal", "lower", "negative"):
+            for kw in keywords.get(tier, []):
+                kw_l = kw.lower()
+                if " " in kw_l:
+                    in_title = kw_l in title_l
+                    in_body  = kw_l in body_l
+                    if in_title or in_body:
+                        matches[tier].append(kw)
+                        tw, bw = TIER_WEIGHT[tier]
+                        pts = (tw if in_title else 0) + (bw if (in_body and not in_title) else 0)
+                        # if in both, use title weight (it's higher)
+                        if in_title:
+                            pts = tw
+                        score += pts
+                        breakdown[kw] = (tier, pts)
                 else:
-                    # Word boundary matching for single words
-                    pattern = rf'\b{re.escape(keyword_lower)}\b'
-                    if re.search(pattern, combined_text):
-                        matches[level].append(keyword)
-                        if level == "normal":
-                            score += 2.0
-                        elif level == "lower":
-                            score += 1.0
-                        elif level == "negative":
-                            score -= 2.0
+                    pattern = rf'\b{re.escape(kw_l)}\b'
+                    in_title = bool(re.search(pattern, title_l))
+                    in_body  = bool(re.search(pattern, body_l))
+                    if in_title or in_body:
+                        matches[tier].append(kw)
+                        tw, bw = TIER_WEIGHT[tier]
+                        tw /= SINGLE_DIVISOR
+                        bw /= SINGLE_DIVISOR
+                        pts = (tw if in_title else bw)
+                        score += pts
+                        breakdown[kw] = (tier, pts)
 
-        # Apply context boost only if we have positive matches
+        # ── Context boost (capped at +2.0) ───────────────────────────────────
+        context_boost = 0.0
         if matches["normal"] or matches["lower"]:
+            for cp in CONTEXT_PATTERNS:
+                if cp.search(combined):
+                    context_boost = min(context_boost + 0.5, 2.0)
             score += context_boost
 
-        # Title vs body weight (title matches are more important)
-        title_matches = sum(len(matches[lvl]) for lvl in ["normal", "lower"]
-                            if any(kw.lower() in title_lower for kw in matches[lvl]))
-        if title_matches > 0:
-            score += 1.0  # Bonus for title matches
-
         return {
-            "immediate": bool(matches["higher"]),
-            "score": score,
-            "matches": matches,
-            "context_boost": context_boost
+            "immediate":     bool(matches["higher"]),
+            "score":         round(score, 2),
+            "matches":       matches,
+            "context_boost": context_boost,
+            "breakdown":     breakdown,
         }
 
-    async def _should_notify(self, thread_data: dict, detect_info: dict,
-                             guild: discord.Guild) -> bool:
-        """Advanced filtering to reduce false positives."""
-
-        # Always notify for immediate matches
-        if detect_info["immediate"]:
+    async def _should_notify(
+        self,
+        thread_data: dict,
+        detect: dict,
+        guild: discord.Guild,
+    ) -> bool:
+        if detect["immediate"]:
             return True
 
-        # Check basic score threshold
         threshold = await self.config.guild(guild).threshold()
-        if detect_info["score"] < threshold:
+        if detect["score"] < threshold:
             return False
 
-        # Additional filters
-        title = thread_data.get('title', '').lower()
-        body = thread_data.get('content', '').lower()
-
-        # Skip if too many negative indicators
-        negative_count = len(detect_info["matches"]["negative"])
-        positive_count = len(detect_info["matches"]["normal"]) + len(detect_info["matches"]["lower"])
-
-        if negative_count >= positive_count and negative_count > 2:
-            return False
-
-        # Skip common false positive patterns
-        false_positive_patterns = [
-            r'\b(selling|buying|trade|auction|price check|worth)\b',
-            r'\b(looking for|want to buy|WTB|WTS)\b',
-            r'\b(collection|skill|level|exp|xp)\b.*\b(boost|farm)\b',
-            r'\b(what.*worth|how much|value)\b'
-        ]
-
+        title = thread_data.get("title", "").lower()
+        body  = thread_data.get("content", "").lower()
         combined = f"{title} {body}"
-        for pattern in false_positive_patterns:
-            if re.search(pattern, combined, re.IGNORECASE):
+
+        # Too many negative indicators vs positive
+        neg = len(detect["matches"]["negative"])
+        pos = len(detect["matches"]["normal"]) + len(detect["matches"]["lower"])
+        if neg >= pos and neg > 2:
+            return False
+
+        # Common false-positive patterns
+        for pat in FALSE_POSITIVE_PATTERNS:
+            if pat.search(combined):
                 return False
 
-        # Require stronger signals for borderline scores
-        if detect_info["score"] < threshold + 1.0:
-            # Need at least one strong keyword or good context
-            if not detect_info["matches"]["normal"] and detect_info.get("context_boost", 0) < 1.0:
+        # Borderline score needs at least one normal keyword or decent context
+        if detect["score"] < threshold + 1.5:
+            if not detect["matches"]["normal"] and detect["context_boost"] < 1.0:
                 return False
 
         return True
 
-    async def _notify(self, guild: discord.Guild, thread_data: dict, detect_info: dict):
-        """Enhanced notification with confidence indicators."""
+    # ── Notification ──────────────────────────────────────────────────────────
+    async def _notify(self, guild: discord.Guild, thread: dict, detect: dict):
         channel_id = await self.config.guild(guild).notify_channel_id()
         if not channel_id:
             return
-
         channel = guild.get_channel(channel_id)
         if not channel:
             return
 
-        title = thread_data.get('title', 'Unknown Title')
-        url = thread_data.get('url', '')
-        author = thread_data.get('author', 'Unknown')
-        category = thread_data.get('category', 'Unknown Category')
-        content = thread_data.get('content', '')
-
-        # Determine confidence level
-        score = detect_info.get("score", 0.0)
-        if detect_info["immediate"]:
-            confidence = "🔴 HIGH (Immediate)"
-            color = discord.Color.red()
-        elif score >= 5.0:
-            confidence = "🟠 HIGH"
-            color = discord.Color.orange()
+        score = detect["score"]
+        if detect["immediate"]:
+            confidence, color = "🔴 HIGH (Immediate)", discord.Color.red()
+        elif score >= 6.0:
+            confidence, color = "🟠 HIGH",   discord.Color.orange()
         elif score >= 3.0:
-            confidence = "🟡 MEDIUM"
-            color = discord.Color.gold()
+            confidence, color = "🟡 MEDIUM", discord.Color.gold()
         else:
-            confidence = "🟢 LOW"
-            color = discord.Color.green()
+            confidence, color = "🟢 LOW",    discord.Color.green()
 
+        content = thread.get("content", "") or ""
         embed = discord.Embed(
-            title=title[:256],
-            url=url,
-            description=(content[:500] + "..." if len(content) > 500 else content) or "No content preview available",
+            title=thread.get("title", "Unknown")[:256],
+            url=thread.get("url", ""),
+            description=(content[:500] + "…") if len(content) > 500 else content or "No preview",
             color=color,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
         )
+        embed.add_field(name="Confidence", value=confidence,       inline=True)
+        embed.add_field(name="Score",      value=f"{score:.1f}",   inline=True)
+        embed.add_field(name="Category",   value=thread.get("category", "?"), inline=True)
 
-        embed.add_field(name="Confidence", value=confidence, inline=True)
-        embed.add_field(name="Score", value=f"{score:.1f}", inline=True)
-        embed.add_field(name="Category", value=category, inline=True)
-
-        # Show only significant matches to reduce noise
-        matches = detect_info.get("matches", {})
-        for lvl in ("higher", "normal"):
-            vals = matches.get(lvl, [])
+        for tier in ("higher", "normal"):
+            vals = detect["matches"].get(tier, [])
             if vals:
                 embed.add_field(
-                    name=f"{lvl.title()} Keywords",
-                    value=", ".join(vals[:5]) + ("..." if len(vals) > 5 else ""),
-                    inline=False
+                    name=f"{tier.title()} Keywords",
+                    value=", ".join(vals[:6]) + ("…" if len(vals) > 6 else ""),
+                    inline=False,
                 )
-
-        # Show negative matches if they exist (for debugging)
-        if matches.get("negative"):
+        if detect["matches"].get("negative"):
             embed.add_field(
                 name="⚠️ Negative Indicators",
-                value=", ".join(matches["negative"][:3]),
-                inline=False
+                value=", ".join(detect["matches"]["negative"][:4]),
+                inline=False,
             )
 
-        embed.set_footer(text=f"by {author} • Hypixel Forums")
-
+        embed.set_footer(text=f"by {thread.get('author','?')} • Hypixel Forums")
         try:
             await channel.send(embed=embed)
         except Exception:
             LOGGER.exception("Failed to send notification")
 
+    # ── Processed-ID helpers ─────────────────────────────────────────────────
+    def _proc_lock(self, guild_id: int) -> asyncio.Lock:
+        if guild_id not in self._proc_locks:
+            self._proc_locks[guild_id] = asyncio.Lock()
+        return self._proc_locks[guild_id]
+
     async def _add_processed(self, guild: discord.Guild, thread_id: str):
-        async with self._global_lock:
-            processed = await self.config.guild(guild).processed_ids()
+        async with self._proc_lock(guild.id):
+            processed = await self.config.guild(guild).processed_ids() or []
             maxp = await self.config.guild(guild).max_processed()
-            if processed is None:
-                processed = []
-            processed.append(thread_id)
-            # keep most recent N
+            if thread_id not in processed:
+                processed.append(thread_id)
             if len(processed) > maxp:
                 processed = processed[-maxp:]
             await self.config.guild(guild).processed_ids.set(processed)
 
     async def _is_processed(self, guild: discord.Guild, thread_id: str) -> bool:
         processed = await self.config.guild(guild).processed_ids()
-        return processed and thread_id in processed
+        return bool(processed) and thread_id in processed
 
-    async def _send_debug_message(self, guild: discord.Guild, message: str):
-        """Send debug message to the notification channel."""
-        debug_enabled = await self.config.guild(guild).default_debug()
-        if not debug_enabled:
+    # ── Debug helper ─────────────────────────────────────────────────────────
+    async def _debug(self, guild: discord.Guild, msg: str):
+        if not await self.config.guild(guild).debug():
             return
+        ch_id = await self.config.guild(guild).notify_channel_id()
+        if ch_id and (ch := guild.get_channel(ch_id)):
+            try:
+                await ch.send(msg)
+            except Exception:
+                pass
 
-        channel_id = await self.config.guild(guild).notify_channel_id()
-        if not channel_id:
-            return
-
-        channel = guild.get_channel(channel_id)
-        if not channel:
-            return
-
+    # ── Forum scraping ────────────────────────────────────────────────────────
+    async def _get_thread_content(
+        self, session: aiohttp.ClientSession, url: str
+    ) -> str:
         try:
-            await channel.send(message)
-        except Exception:
-            LOGGER.exception("Failed to send debug message")
-
-    # ------------------------- Forum Parsing -------------------------
-    def _extract_thread_id_from_class(self, class_str: str) -> Optional[str]:
-        """Extract thread ID from class attribute."""
-        if not class_str:
-            return None
-
-        match = re.search(r'js-threadListItem-(\d+)', class_str)
-        if match:
-            return match.group(1)
-        return None
-
-    async def _get_thread_content(self, session: aiohttp.ClientSession, thread_url: str) -> str:
-        """Get the content of a thread."""
-        try:
-            async with session.get(thread_url) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-
-                    content_element = soup.select_one('.message-body .message-userContent')
-                    if not content_element:
-                        content_element = soup.select_one('.message--post .message-body')
-
-                    if content_element:
-                        content = content_element.get_text(strip=True, separator=' ')
-                        content = re.sub(r'\s+', ' ', content)
-                        return content
-
+            async with session.get(url) as r:
+                if r.status == 200:
+                    soup = BeautifulSoup(await r.text(), "html.parser")
+                    el = soup.select_one(".message-body .message-userContent") or \
+                         soup.select_one(".message--post .message-body")
+                    if el:
+                        return re.sub(r"\s+", " ", el.get_text(" ", strip=True))
         except Exception as e:
-            LOGGER.warning("Error fetching thread content from %s: %s", thread_url, e)
-
+            LOGGER.warning("Content fetch failed %s: %s", url, e)
         return ""
 
-    async def _get_recent_threads(self, session: aiohttp.ClientSession, category: Dict[str, str]) -> List[
-        Dict[str, str]]:
-        """Get recent threads from a forum category."""
+    async def _get_recent_threads(
+        self, session: aiohttp.ClientSession, category: Dict[str, str]
+    ) -> List[Dict]:
         threads = []
-
         try:
-            async with session.get(category['url']) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-
-                    thread_items = soup.select('.structItem--thread')
-
-                    for item in thread_items:
-                        try:
-                            # Extract thread ID
-                            class_attr = item.get('class', [])
-                            class_str = ' '.join(class_attr)
-                            thread_id = self._extract_thread_id_from_class(class_str)
-
-                            if not thread_id:
-                                continue
-
-                            # Extract title and URL
-                            title_element = item.select_one('.structItem-title')
-                            if not title_element:
-                                continue
-
-                            title = title_element.get_text(strip=True)
-                            url_element = title_element.select_one('a')
-                            if not url_element:
-                                continue
-
-                            relative_url = url_element.get('href', '')
-                            full_url = urljoin("https://hypixel.net", relative_url)
-
-                            # Extract author
-                            author_element = item.select_one('.structItem-minor .username')
-                            if not author_element:
-                                author_element = item.select_one('.username')
-
-                            author = author_element.get_text(strip=True) if author_element else "Unknown"
-
-                            threads.append({
-                                'id': thread_id,
-                                'title': title,
-                                'url': full_url,
-                                'author': author,
-                                'category': category['name'],
-                                'content': ''  # Will be fetched if needed
-                            })
-                        except Exception as e:
-                            LOGGER.warning("Error parsing thread item: %s", e)
+            async with session.get(category["url"]) as r:
+                if r.status != 200:
+                    return threads
+                soup = BeautifulSoup(await r.text(), "html.parser")
+                for item in soup.select(".structItem--thread"):
+                    try:
+                        cls   = " ".join(item.get("class", []))
+                        m     = re.search(r"js-threadListItem-(\d+)", cls)
+                        if not m:
                             continue
-
+                        tid   = m.group(1)
+                        title_el = item.select_one(".structItem-title")
+                        if not title_el:
+                            continue
+                        title  = title_el.get_text(strip=True)
+                        a      = title_el.select_one("a")
+                        if not a:
+                            continue
+                        url    = urljoin("https://hypixel.net", a["href"])
+                        author_el = item.select_one(".structItem-minor .username") or \
+                                    item.select_one(".username")
+                        author = author_el.get_text(strip=True) if author_el else "Unknown"
+                        threads.append({
+                            "id": tid, "title": title, "url": url,
+                            "author": author, "category": category["name"],
+                            "content": "",
+                        })
+                    except Exception as e:
+                        LOGGER.warning("Thread parse error: %s", e)
         except Exception as e:
-            LOGGER.error("Error fetching threads from %s: %s", category['name'], e)
-
+            LOGGER.error("Category fetch error (%s): %s", category["name"], e)
         return threads
 
-    # ------------------------- Monitoring Task -------------------------
+    # ── Monitoring loop ───────────────────────────────────────────────────────
     async def _monitor_guild(self, guild: discord.Guild):
-        """Main monitoring loop for a guild."""
-        LOGGER.info("Starting monitor for guild %s", guild.id)
-
+        LOGGER.info("Monitor started: guild %s", guild.id)
         try:
             while True:
                 try:
-                    # Check if monitoring is still enabled
-                    enabled = await self.config.guild(guild).enabled()
-                    if not enabled:
-                        LOGGER.info("Monitoring disabled for guild %s; stopping task", guild.id)
+                    if not await self.config.guild(guild).enabled():
+                        LOGGER.info("Monitoring disabled, stopping: guild %s", guild.id)
                         break
 
-                    # Get configuration
-                    categories = await self.config.guild(guild).forum_categories()
-                    if not categories:
-                        LOGGER.debug("No forum categories configured for guild %s", guild.id)
-                        await self._send_debug_message(guild,
-                                                       "⚠️ Hypixel monitor is alive but no forum categories are configured.")
+                    cats = await self.config.guild(guild).forum_categories()
+                    if not cats:
+                        await self._debug(guild, "⚠️ Monitor alive — no forum categories configured.")
                     else:
-                        await self._monitor_categories(guild, categories)
+                        await self._check_categories(guild, cats)
 
-                    # Wait for next check
                     interval = await self.config.guild(guild).interval()
-                    if not isinstance(interval, int) or interval < MIN_INTERVAL:
-                        interval = MIN_INTERVAL
-
-                    LOGGER.debug("Guild %s sleeping for %d seconds", guild.id, interval)
+                    interval = max(interval, MIN_INTERVAL)
                     await asyncio.sleep(interval)
 
                 except asyncio.CancelledError:
-                    LOGGER.info("Monitor task cancelled for guild %s", guild.id)
                     break
                 except Exception:
-                    LOGGER.exception("Error in monitoring loop for guild %s", guild.id)
-                    await self._send_debug_message(guild, "❌ Hypixel monitor encountered an error. Retrying in 60s...")
+                    LOGGER.exception("Loop error: guild %s", guild.id)
+                    await self._debug(guild, "❌ Monitor error — retrying in 60 s…")
                     await asyncio.sleep(60)
-
         except asyncio.CancelledError:
-            LOGGER.info("Monitor task cancelled for guild %s", guild.id)
+            pass
         except Exception:
-            LOGGER.exception("Fatal error in monitor task for guild %s", guild.id)
+            LOGGER.exception("Fatal error: guild %s", guild.id)
         finally:
-            # Cleanup
-            await self._cleanup_guild_task(guild.id)
+            await self._cleanup(guild.id)
 
-    async def _monitor_categories(self, guild: discord.Guild, categories: List[Dict[str, str]]):
-        """Monitor all configured forum categories for a guild."""
+    async def _check_categories(self, guild: discord.Guild, cats: List[Dict]):
         keywords = await self.config.guild(guild).keywords()
-        session = await self._get_session(guild)
+        session  = await self._get_session(guild)
+        notified = 0
+        checked  = 0
 
-        found_any_match = False
-        total_threads_checked = 0
-
-        for category in categories:
+        for cat in cats:
             try:
-                threads = await self._get_recent_threads(session, category)
-                threads_checked = 0
-
+                threads = await self._get_recent_threads(session, cat)
                 for thread in threads:
-                    threads_checked += 1
-                    total_threads_checked += 1
-
-                    # Skip if already processed
-                    if await self._is_processed(guild, thread['id']):
+                    checked += 1
+                    if await self._is_processed(guild, thread["id"]):
                         continue
-
-                    # Get thread content for better analysis
-                    if not thread['content']:
-                        thread['content'] = await self._get_thread_content(session, thread['url'])
-
-                    # Analyze thread content
-                    title = thread['title'] or ""
-                    body = thread['content'] or ""
-                    detect = self._match_score(title, body, keywords)
-
-                    # Check if we should notify
-                    should_notify = await self._should_notify(thread, detect, guild)
-
-                    if should_notify:
-                        found_any_match = True
+                    if not thread["content"]:
+                        thread["content"] = await self._get_thread_content(
+                            session, thread["url"]
+                        )
+                    detect = self._score_text(
+                        thread["title"], thread["content"], keywords
+                    )
+                    if await self._should_notify(thread, detect, guild):
                         await self._notify(guild, thread, detect)
-                        LOGGER.info("Notified for thread %s in %s for guild %s", thread['id'], category['name'],
-                                    guild.id)
-
-                    # Mark as processed regardless
-                    await self._add_processed(guild, thread['id'])
-
-                LOGGER.debug("Checked %d threads in %s for guild %s", threads_checked, category['name'], guild.id)
-
+                        notified += 1
+                        LOGGER.info("Notified: %s in %s (guild %s)", thread["id"], cat["name"], guild.id)
+                    await self._add_processed(guild, thread["id"])
             except Exception:
-                LOGGER.exception("Error processing category %s for guild %s", category['name'], guild.id)
+                LOGGER.exception("Category error (%s): guild %s", cat["name"], guild.id)
 
-        # Send debug message if no matches found and debug is enabled
-        if not found_any_match:
-            await self._send_debug_message(
+        if notified == 0:
+            await self._debug(
                 guild,
-                f"✅ Hypixel monitor is alive. Checked {total_threads_checked} threads across {len(categories)} categor(y/ies). No matching threads found this cycle."
+                f"✅ Monitor alive — checked {checked} threads across "
+                f"{len(cats)} category/ies. No matches this cycle.",
             )
 
-    async def _cleanup_guild_task(self, guild_id: int):
-        """Clean up resources for a guild's monitoring task."""
-        # Remove task from tracking
+    # ── Task management ───────────────────────────────────────────────────────
+    async def _cleanup(self, guild_id: int):
         self._tasks.pop(guild_id, None)
-
-        # Close aiohttp session
-        session = self._sessions.pop(guild_id, None)
-        if session:
+        s = self._sessions.pop(guild_id, None)
+        if s:
             try:
-                await session.close()
+                await s.close()
             except Exception:
-                LOGGER.exception("Error closing aiohttp session for guild %s", guild_id)
-
-        # Remove task lock
+                pass
         self._task_locks.pop(guild_id, None)
+        self._proc_locks.pop(guild_id, None)
 
-        LOGGER.info("Cleanup completed for guild %s", guild_id)
+    def _get_task_lock(self, guild_id: int) -> asyncio.Lock:
+        if guild_id not in self._task_locks:
+            self._task_locks[guild_id] = asyncio.Lock()
+        return self._task_locks[guild_id]
 
     async def _ensure_task(self, guild: discord.Guild):
-        """Ensure a monitoring task is running for a guild (thread-safe)."""
-        if guild.id not in self._task_locks:
-            self._task_locks[guild.id] = asyncio.Lock()
-
-        async with self._task_locks[guild.id]:
-            # Check if task already exists and is healthy
-            existing_task = self._tasks.get(guild.id)
-            if existing_task and not existing_task.done():
-                LOGGER.debug("Task already running for guild %s", guild.id)
+        async with self._get_task_lock(guild.id):
+            t = self._tasks.get(guild.id)
+            if t and not t.done():
                 return
-
-            # Clean up any done task
-            if existing_task:
-                LOGGER.info("Cleaning up completed task for guild %s", guild.id)
-                await self._cleanup_guild_task(guild.id)
-
-            # Check if monitoring is enabled
-            enabled = await self.config.guild(guild).enabled()
-            if not enabled:
-                LOGGER.debug("Monitoring disabled for guild %s, not starting task", guild.id)
+            if t:
+                await self._cleanup(guild.id)
+            if not await self.config.guild(guild).enabled():
                 return
-
-            # Create new task
-            LOGGER.info("Creating new monitoring task for guild %s", guild.id)
-            task = self.bot.loop.create_task(self._monitor_guild(guild))
-            self._tasks[guild.id] = task
+            self._tasks[guild.id] = self.bot.loop.create_task(
+                self._monitor_guild(guild)
+            )
 
     async def _stop_task(self, guild: discord.Guild):
-        """Stop monitoring task for a guild (thread-safe)."""
-        if guild.id not in self._task_locks:
-            return
-
-        async with self._task_locks[guild.id]:
-            task = self._tasks.get(guild.id)
-            if task and not task.cancelled():
-                LOGGER.info("Stopping monitoring task for guild %s", guild.id)
-                task.cancel()
+        async with self._get_task_lock(guild.id):
+            t = self._tasks.get(guild.id)
+            if t and not t.cancelled():
+                t.cancel()
                 try:
-                    await task
+                    await t
                 except asyncio.CancelledError:
                     pass
-            await self._cleanup_guild_task(guild.id)
+            await self._cleanup(guild.id)
 
-    # ------------------------- Commands -------------------------
-    @commands.group()
+    # ═════════════════════════════════════════════════════════════════════════
+    # Commands
+    # ═════════════════════════════════════════════════════════════════════════
+
+    @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def hmonitor(self, ctx: commands.Context):
-        """Hypixel monitor commands. Use 'quicksetup' or 'loaddefaults' to get started quickly."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help()
+        """Hypixel forum monitor. Start with ``quicksetup``, then ``enable``.
 
-    @hmonitor.command(name="quicksetup")
+        **Quick start**
+        ```
+        [p]hmonitor quicksetup #channel
+        [p]hmonitor enable
+        ```
+        """
+        await ctx.send_help()
+
+    # ── Setup ─────────────────────────────────────────────────────────────────
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def quicksetup(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Quick setup: set channel and load default keywords."""
+        """One-shot setup: sets channel, loads default keywords & categories."""
         await self.config.guild(ctx.guild).notify_channel_id.set(channel.id)
         await self.config.guild(ctx.guild).keywords.set(deepcopy(DEFAULT_KEYWORDS))
         await self.config.guild(ctx.guild).forum_categories.set(deepcopy(DEFAULT_FORUM_CATEGORIES))
+        await ctx.send(
+            f"✅ Quick setup complete!\n"
+            f"📢 Channel: {channel.mention}\n"
+            f"🔑 Default keywords loaded\n"
+            f"📂 Default forum categories loaded\n"
+            f"▶️  Run `{ctx.prefix}hmonitor enable` to start."
+        )
 
-        await ctx.send(f"✅ Quick setup complete!\n"
-                       f"📢 Notification channel: {channel.mention}\n"
-                       f"🔑 Default keywords loaded\n"
-                       f"📂 Default forum categories loaded\n"
-                       f"⚙️ Next step: Enable monitoring with `{ctx.prefix}hmonitor enable`")
-
-    # Channel management
-    @hmonitor.command(name="setchannel")
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where Hypixel forum notifications will be posted."""
+        """Set the notification channel."""
         await self.config.guild(ctx.guild).notify_channel_id.set(channel.id)
-        await ctx.send(f"Notification channel set to {channel.mention}")
+        await ctx.send(f"Notification channel set to {channel.mention}.")
 
-    # Forum category management
-    @hmonitor.command(name="addcategory")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def addcategory(self, ctx: commands.Context, url: str, *, name: str):
-        """Add a forum category to monitor."""
-        async with self.config.guild(ctx.guild).forum_categories() as categories:
-            if any(cat['url'] == url or cat['name'] == name for cat in categories):
-                await ctx.send("A category with that URL or name already exists.")
-                return
-            categories.append({"url": url, "name": name})
-        await ctx.send(f"Added forum category: {name}")
-
-    @hmonitor.command(name="remcategory")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def remcategory(self, ctx: commands.Context, *, name: str):
-        """Remove a forum category from monitoring."""
-        async with self.config.guild(ctx.guild).forum_categories() as categories:
-            original_length = len(categories)
-            categories[:] = [cat for cat in categories if cat['name'] != name]
-            if len(categories) == original_length:
-                await ctx.send("That category is not in the monitored list.")
-                return
-        await ctx.send(f"Removed forum category: {name}")
-
-    @hmonitor.command(name="listcategories")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def listcategories(self, ctx: commands.Context):
-        """List all monitored forum categories."""
-        categories = await self.config.guild(ctx.guild).forum_categories()
-        if not categories:
-            await ctx.send("No forum categories configured.")
-            return
-
-        msg_lines = ["Monitored forum categories:"]
-        for cat in categories:
-            msg_lines.append(f"- **{cat['name']}**: {cat['url']}")
-
-        msg = "\n".join(msg_lines)
-        for page in pagify(msg):
-            await ctx.send(page)
-
-    # Enable / disable
-    @hmonitor.command(name="enable")
+    # ── Enable / disable ──────────────────────────────────────────────────────
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def enable(self, ctx: commands.Context):
-        """Enable monitoring for this guild."""
-        enabled = await self.config.guild(ctx.guild).enabled()
-        if enabled:
-            await ctx.send("Monitoring is already enabled. Use `!hmonitor disable` to turn off.")
+        """Start monitoring."""
+        if await self.config.guild(ctx.guild).enabled():
+            await ctx.send("Already enabled. Use `disable` to stop.")
             return
         await self.config.guild(ctx.guild).enabled.set(True)
-        await ctx.send("Monitoring enabled for this guild.")
         await self._ensure_task(ctx.guild)
+        await ctx.send("✅ Monitoring enabled.")
 
-    @hmonitor.command(name="disable")
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def disable(self, ctx: commands.Context):
-        """Disable monitoring for this guild."""
+        """Stop monitoring."""
         await self.config.guild(ctx.guild).enabled.set(False)
         await self._stop_task(ctx.guild)
-        await ctx.send("Monitoring disabled for this guild.")
+        await ctx.send("⏹ Monitoring disabled.")
 
-    # Interval and threshold
-    @hmonitor.command(name="setinterval")
+    @hmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def restart(self, ctx: commands.Context):
+        """Restart the monitoring task."""
+        await self._stop_task(ctx.guild)
+        await asyncio.sleep(1)
+        await self._ensure_task(ctx.guild)
+        await ctx.send("♻️ Monitoring task restarted.")
+
+    # ── Interval / threshold ──────────────────────────────────────────────────
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def setinterval(self, ctx: commands.Context, seconds: int):
         """Set check interval in seconds (minimum 60)."""
         if seconds < MIN_INTERVAL:
-            await ctx.send(f"Interval must be at least {MIN_INTERVAL} seconds.")
+            await ctx.send(f"Minimum interval is {MIN_INTERVAL} s.")
             return
         await self.config.guild(ctx.guild).interval.set(seconds)
-        await ctx.send(f"Check interval set to {seconds} seconds.")
+        await ctx.send(f"Interval set to {seconds} s.")
 
-    @hmonitor.command(name="setthreshold")
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def setthreshold(self, ctx: commands.Context, threshold: float):
-        """Set detection threshold (float between 1.0 and 10.0)."""
-        if threshold < 1.0 or threshold > 10.0:
-            await ctx.send("Threshold must be between 1.0 and 10.0")
+        """Set detection threshold (1.0 – 10.0). Lower = more sensitive."""
+        if not 1.0 <= threshold <= 10.0:
+            await ctx.send("Threshold must be between 1.0 and 10.0.")
             return
         await self.config.guild(ctx.guild).threshold.set(threshold)
-        await ctx.send(f"Detection threshold set to {threshold}")
+        await ctx.send(f"Threshold set to {threshold}.")
 
-    # Keywords management
-    @hmonitor.group(name="keyword")
+    # ── Forum categories ──────────────────────────────────────────────────────
+    @hmonitor.group(name="category", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
-    async def keyword(self, ctx: commands.Context):
-        """Manage detection keywords. Subcommands: add/remove/list"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help()
+    async def category(self, ctx: commands.Context):
+        """Manage monitored forum categories."""
+        await ctx.send_help()
 
-    @keyword.command(name="add")
-    async def keyword_add(self, ctx: commands.Context, level: str, *, pattern: str):
-        """Add a keyword/pattern to a level. Levels: higher, normal, lower, negative"""
-        level = level.lower()
-        if level not in ("higher", "normal", "lower", "negative"):
-            await ctx.send("Invalid level. Use higher, normal, lower, or negative.")
-            return
-        async with self.config.guild(ctx.guild).keywords() as kw:
-            kw[level].append(pattern)
-        await ctx.send(f"Added pattern to {level}: `{pattern}`")
-
-    @keyword.command(name="remove")
-    async def keyword_remove(self, ctx: commands.Context, level: str, *, pattern: str):
-        level = level.lower()
-        if level not in ("higher", "normal", "lower", "negative"):
-            await ctx.send("Invalid level. Use higher, normal, lower, or negative.")
-            return
-        async with self.config.guild(ctx.guild).keywords() as kw:
-            if pattern not in kw[level]:
-                await ctx.send("Pattern not found in that level.")
+    @category.command(name="add")
+    async def category_add(self, ctx: commands.Context, url: str, *, name: str):
+        """Add a forum category URL with a friendly name."""
+        async with self.config.guild(ctx.guild).forum_categories() as cats:
+            if any(c["url"] == url or c["name"] == name for c in cats):
+                await ctx.send("A category with that URL or name already exists.")
                 return
-            kw[level].remove(pattern)
-        await ctx.send(f"Removed pattern from {level}: `{pattern}`")
+            cats.append({"url": url, "name": name})
+        await ctx.send(f"Added category: **{name}**")
 
-    @keyword.command(name="list")
-    async def keyword_list(self, ctx: commands.Context):
-        kw = await self.config.guild(ctx.guild).keywords()
-        msg_lines = []
-        for lvl in ("higher", "normal", "lower", "negative"):
-            vals = kw.get(lvl, []) or []
-            msg_lines.append(f"{lvl.title()} ({len(vals)}):")
-            for v in vals:
-                msg_lines.append(f"  - {v}")
-        for page in pagify("\n".join(msg_lines)):
+    @category.command(name="remove")
+    async def category_remove(self, ctx: commands.Context, *, name: str):
+        """Remove a forum category by name."""
+        async with self.config.guild(ctx.guild).forum_categories() as cats:
+            before = len(cats)
+            cats[:] = [c for c in cats if c["name"] != name]
+            if len(cats) == before:
+                await ctx.send("No category with that name found.")
+                return
+        await ctx.send(f"Removed category: **{name}**")
+
+    @category.command(name="list")
+    async def category_list(self, ctx: commands.Context):
+        """List all monitored forum categories."""
+        cats = await self.config.guild(ctx.guild).forum_categories()
+        if not cats:
+            await ctx.send("No categories configured.")
+            return
+        lines = ["**Monitored categories**"]
+        for c in cats:
+            lines.append(f"• **{c['name']}** — {c['url']}")
+        for page in pagify("\n".join(lines)):
             await ctx.send(page)
 
-    @hmonitor.command(name="loaddefaults")
+    # ── Keywords ──────────────────────────────────────────────────────────────
+    @hmonitor.group(name="keyword", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
-    async def loaddefaults(self, ctx: commands.Context, merge: bool = False):
-        """Load default keyword sets. Use 'true' as second argument to merge with existing keywords instead of replacing."""
+    async def keyword(self, ctx: commands.Context):
+        """Manage detection keywords.
+
+        Tiers: ``higher`` · ``normal`` · ``lower`` · ``negative``
+        """
+        await ctx.send_help()
+
+    @keyword.command(name="add")
+    async def keyword_add(self, ctx: commands.Context, tier: str, *, keyword: str):
+        """Add one keyword to a tier.
+
+        Example: ``[p]hmonitor keyword add normal skyhanni``
+        """
+        tier = tier.lower()
+        if tier not in ("higher", "normal", "lower", "negative"):
+            await ctx.send("Invalid tier. Use: `higher`, `normal`, `lower`, or `negative`.")
+            return
+        async with self.config.guild(ctx.guild).keywords() as kw:
+            if keyword in kw[tier]:
+                await ctx.send("That keyword is already in this tier.")
+                return
+            kw[tier].append(keyword)
+        await ctx.send(f"Added to **{tier}**: `{keyword}`")
+
+    @keyword.command(name="bulkadd")
+    async def keyword_bulkadd(self, ctx: commands.Context, tier: str, *, keywords: str):
+        """Add multiple comma-separated keywords to a tier at once.
+
+        Example: ``[p]hmonitor keyword bulkadd normal skyhanni, skyblocker, sodium``
+        """
+        tier = tier.lower()
+        if tier not in ("higher", "normal", "lower", "negative"):
+            await ctx.send("Invalid tier. Use: `higher`, `normal`, `lower`, or `negative`.")
+            return
+        new_kws = [k.strip() for k in keywords.split(",") if k.strip()]
+        if not new_kws:
+            await ctx.send("No keywords found. Separate them with commas.")
+            return
+        added, skipped = [], []
+        async with self.config.guild(ctx.guild).keywords() as kw:
+            for nk in new_kws:
+                if nk in kw[tier]:
+                    skipped.append(nk)
+                else:
+                    kw[tier].append(nk)
+                    added.append(nk)
+        parts = []
+        if added:
+            parts.append(f"✅ Added ({len(added)}): {', '.join(f'`{k}`' for k in added)}")
+        if skipped:
+            parts.append(f"⏭ Already present ({len(skipped)}): {', '.join(f'`{k}`' for k in skipped)}")
+        await ctx.send("\n".join(parts))
+
+    @keyword.command(name="remove")
+    async def keyword_remove(self, ctx: commands.Context, tier: str, *, keyword: str):
+        """Remove a keyword from a tier."""
+        tier = tier.lower()
+        if tier not in ("higher", "normal", "lower", "negative"):
+            await ctx.send("Invalid tier. Use: `higher`, `normal`, `lower`, or `negative`.")
+            return
+        async with self.config.guild(ctx.guild).keywords() as kw:
+            if keyword not in kw[tier]:
+                await ctx.send("Keyword not found in that tier.")
+                return
+            kw[tier].remove(keyword)
+        await ctx.send(f"Removed from **{tier}**: `{keyword}`")
+
+    @keyword.command(name="list")
+    async def keyword_list(self, ctx: commands.Context, tier: str = "all"):
+        """List keywords. Optionally filter by tier.
+
+        Example: ``[p]hmonitor keyword list normal``
+        """
+        kw = await self.config.guild(ctx.guild).keywords()
+        tiers = ("higher", "normal", "lower", "negative") if tier == "all" \
+                else (tier.lower(),)
+        if any(t not in ("higher", "normal", "lower", "negative") for t in tiers):
+            await ctx.send("Invalid tier. Use: `higher`, `normal`, `lower`, `negative`, or `all`.")
+            return
+        lines = []
+        for t in tiers:
+            vals = kw.get(t, [])
+            lines.append(f"**{t.title()}** ({len(vals)})")
+            for v in vals:
+                lines.append(f"  • {v}")
+        for page in pagify("\n".join(lines)):
+            await ctx.send(page)
+
+    @keyword.command(name="find")
+    async def keyword_find(self, ctx: commands.Context, *, search: str):
+        """Search for a keyword across all tiers.
+
+        Example: ``[p]hmonitor keyword find sodium``
+        """
+        kw = await self.config.guild(ctx.guild).keywords()
+        search_l = search.lower()
+        found = []
+        for tier in ("higher", "normal", "lower", "negative"):
+            for k in kw.get(tier, []):
+                if search_l in k.lower():
+                    found.append(f"**{tier}**: `{k}`")
+        if found:
+            await ctx.send("\n".join(found))
+        else:
+            await ctx.send(f"No keywords matching `{search}` found in any tier.")
+
+    @keyword.command(name="export")
+    async def keyword_export(self, ctx: commands.Context):
+        """Export keywords as a JSON file you can re-import later."""
+        kw = await self.config.guild(ctx.guild).keywords()
+        data = json.dumps(kw, indent=2)
+        fp = discord.File(
+            fp=__import__("io").BytesIO(data.encode()),
+            filename="keywords.json",
+        )
+        await ctx.send("Here are your current keywords:", file=fp)
+
+    @keyword.command(name="import")
+    async def keyword_import(self, ctx: commands.Context, merge: bool = False):
+        """Import keywords from an attached JSON file.
+
+        Pass ``true`` as the second argument to merge instead of replace.
+        """
+        if not ctx.message.attachments:
+            await ctx.send("Please attach a JSON file exported by `keyword export`.")
+            return
+        att = ctx.message.attachments[0]
+        if not att.filename.endswith(".json"):
+            await ctx.send("Attachment must be a `.json` file.")
+            return
+        try:
+            raw  = await att.read()
+            data = json.loads(raw)
+        except Exception as e:
+            await ctx.send(f"Failed to parse JSON: {e}")
+            return
+
+        valid = ("higher", "normal", "lower", "negative")
+        if not all(k in valid for k in data):
+            await ctx.send("JSON must have only keys: higher, normal, lower, negative.")
+            return
+
         if merge:
             async with self.config.guild(ctx.guild).keywords() as kw:
-                for level, defaults in DEFAULT_KEYWORDS.items():
-                    existing = set(kw.get(level, []))
-                    new_keywords = existing.union(set(defaults))
-                    kw[level] = list(new_keywords)
-            await ctx.send("Default keywords merged with existing keywords.")
+                for tier, vals in data.items():
+                    existing = set(kw.get(tier, []))
+                    kw[tier] = list(existing | set(vals))
+            await ctx.send("✅ Keywords merged from file.")
         else:
-            await self.config.guild(ctx.guild).keywords.set(DEFAULT_KEYWORDS.copy())
-            await ctx.send("Default keywords loaded (existing keywords replaced).")
+            await self.config.guild(ctx.guild).keywords.set(data)
+            await ctx.send("✅ Keywords replaced from file.")
 
-        # Show summary
-        kw = await self.config.guild(ctx.guild).keywords()
-        summary = []
-        for level in ("higher", "normal", "lower", "negative"):
-            count = len(kw.get(level, []))
-            summary.append(f"{level}: {count}")
-
-        await ctx.send(f"Keyword counts: {', '.join(summary)}")
-
-    # Processed IDs / storage
-    @hmonitor.command(name="setmaxprocessed")
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
-    async def setmaxprocessed(self, ctx: commands.Context, max_items: int):
-        """Set maximum number of processed forum thread IDs stored to control storage usage."""
-        if max_items < 10:
-            await ctx.send("max_processed must be at least 10")
-            return
-        await self.config.guild(ctx.guild).max_processed.set(max_items)
-        await ctx.send(f"max_processed set to {max_items}")
+    async def loaddefaults(self, ctx: commands.Context, merge: bool = False):
+        """(Re)load the built-in default keywords.
 
-    @hmonitor.command(name="processedcount")
+        Pass ``true`` to merge with existing keywords instead of replacing.
+        """
+        if merge:
+            async with self.config.guild(ctx.guild).keywords() as kw:
+                for tier, defaults in DEFAULT_KEYWORDS.items():
+                    existing = set(kw.get(tier, []))
+                    kw[tier] = list(existing | set(defaults))
+            await ctx.send("Default keywords merged.")
+        else:
+            await self.config.guild(ctx.guild).keywords.set(deepcopy(DEFAULT_KEYWORDS))
+            await ctx.send("Default keywords loaded (previous keywords replaced).")
+
+        kw = await self.config.guild(ctx.guild).keywords()
+        counts = ", ".join(
+            f"{t}: {len(kw.get(t,[]))}" for t in ("higher","normal","lower","negative")
+        )
+        await ctx.send(f"Keyword counts — {counts}")
+
+    # ── Processed IDs ─────────────────────────────────────────────────────────
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def processedcount(self, ctx: commands.Context):
-        processed = await self.config.guild(ctx.guild).processed_ids()
-        cnt = len(processed) if processed else 0
-        await ctx.send(f"Stored processed thread IDs: {cnt}")
+        """Show how many thread IDs are stored in the processed-IDs list."""
+        ids = await self.config.guild(ctx.guild).processed_ids()
+        await ctx.send(f"Stored processed IDs: {len(ids) if ids else 0}")
 
-    # Manual checks and status
-    @hmonitor.command(name="checknow")
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
-    async def checknow(self, ctx: commands.Context):
-        """Run a manual check now in this guild."""
-        await ctx.send("Running manual check...")
+    async def clearprocessed(self, ctx: commands.Context):
+        """Clear the processed-IDs list (will re-check all visible threads)."""
+        await self.config.guild(ctx.guild).processed_ids.set([])
+        await ctx.send("✅ Processed IDs cleared.")
 
-        try:
-            # Get configuration
-            categories = await self.config.guild(ctx.guild).forum_categories()
-            if not categories:
-                await ctx.send("❌ No forum categories configured.")
-                return
+    @hmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def setmaxprocessed(self, ctx: commands.Context, max_items: int):
+        """Cap the processed-ID list size (minimum 10)."""
+        if max_items < 10:
+            await ctx.send("Must be at least 10.")
+            return
+        await self.config.guild(ctx.guild).max_processed.set(max_items)
+        await ctx.send(f"Max processed IDs set to {max_items}.")
 
-            # Run one monitoring cycle
-            await self._monitor_categories(ctx.guild, categories)
-            await ctx.send("✅ Manual check completed.")
-
-        except Exception as e:
-            LOGGER.exception("Error during manual check")
-            await ctx.send(f"❌ Error during manual check: {str(e)}")
-
-    @hmonitor.command(name="status")
+    # ── Status / info ─────────────────────────────────────────────────────────
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def status(self, ctx: commands.Context):
-        """Show current monitoring status and configuration for this guild."""
-        enabled = await self.config.guild(ctx.guild).enabled()
-        categories = await self.config.guild(ctx.guild).forum_categories()
-        channel_id = await self.config.guild(ctx.guild).notify_channel_id()
-        interval = await self.config.guild(ctx.guild).interval()
-        threshold = await self.config.guild(ctx.guild).threshold()
-        maxp = await self.config.guild(ctx.guild).max_processed()
-        kw = await self.config.guild(ctx.guild).keywords()
-        debug = await self.config.guild(ctx.guild).default_debug()
+        """Show current configuration and task status."""
+        g     = ctx.guild
+        cfg   = self.config.guild(g)
+        en    = await cfg.enabled()
+        cats  = await cfg.forum_categories()
+        ch_id = await cfg.notify_channel_id()
+        iv    = await cfg.interval()
+        thr   = await cfg.threshold()
+        maxp  = await cfg.max_processed()
+        kw    = await cfg.keywords()
+        dbg   = await cfg.debug()
+        ids   = await cfg.processed_ids()
 
-        # Check task status
-        task = self._tasks.get(ctx.guild.id)
+        task = self._tasks.get(g.id)
         if task and not task.done():
-            task_status = "🟢 Running"
-        elif task and task.done():
-            task_status = "🔴 Stopped (task completed/failed)"
+            task_st = "🟢 Running"
+        elif task:
+            task_st = "🔴 Stopped (task ended)"
         else:
-            task_status = "🔴 Not running"
+            task_st = "🔴 Not running"
 
-        channel = ctx.guild.get_channel(channel_id) if channel_id else None
-        lines = [
-            f"**Hypixel Monitor Status**",
-            f"Enabled: {enabled}",
-            f"Task Status: {task_status}",
-            f"Channel: {channel.mention if channel else 'Not set'}",
-            f"Forum Categories: {len(categories)}",
-            f"Interval: {interval}s",
-            f"Threshold: {threshold}",
-            f"Debug Mode: {debug}",
-            f"Max processed stored: {maxp}",
-            f"Keywords: higher={len(kw.get('higher') or [])}, normal={len(kw.get('normal') or [])}, lower={len(kw.get('lower') or [])}, negative={len(kw.get('negative') or [])}",
-        ]
+        ch = g.get_channel(ch_id) if ch_id else None
+        await ctx.send(
+            f"**HypixelMonitor Status**\n"
+            f"Enabled: `{en}` | Task: {task_st}\n"
+            f"Channel: {ch.mention if ch else '*(not set)*'}\n"
+            f"Categories: {len(cats)} | Interval: {iv}s | Threshold: {thr}\n"
+            f"Debug: `{dbg}` | Processed IDs stored: {len(ids) if ids else 0}/{maxp}\n"
+            f"Keywords — higher: {len(kw.get('higher',[]))}, "
+            f"normal: {len(kw.get('normal',[]))}, "
+            f"lower: {len(kw.get('lower',[]))}, "
+            f"negative: {len(kw.get('negative',[]))}"
+        )
 
-        await ctx.send("\n".join(lines))
-
-    @hmonitor.command(name="restart")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def restart(self, ctx: commands.Context):
-        """Restart the monitoring task for this guild."""
-        await ctx.send("Restarting monitoring task...")
-        await self._stop_task(ctx.guild)
-        await asyncio.sleep(1)  # Give it a moment to clean up
-        await self._ensure_task(ctx.guild)
-        await ctx.send("✅ Monitoring task restarted.")
-
-    # Test detection
-    @hmonitor.command(name="testdetect")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def testdetect(self, ctx: commands.Context, *, title_and_body: str):
-        """Test the detection algorithm with a sample title (and optional body separated by '\\n')."""
-        if "\n" in title_and_body:
-            title, body = title_and_body.split("\n", 1)
-        else:
-            title, body = title_and_body, ""
-        keywords = await self.config.guild(ctx.guild).keywords()
-        detect = self._match_score(title, body, keywords)
-        lines = [f"Immediate match: {detect['immediate']}", f"Score: {detect['score']}", "Matches:"]
-        for lvl, vals in detect["matches"].items():
-            lines.append(f"  {lvl}: {', '.join(vals) if vals else 'None'}")
-        await ctx.send("\n".join(lines))
-
-    @hmonitor.command(name="debugmode")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def debugmode(self, ctx: commands.Context, enabled: bool):
-        """Enable or disable debug mode (sends 'alive' messages when no matches found)."""
-        await self.config.guild(ctx.guild).default_debug.set(enabled)
-        await ctx.send(f"Debug mode set to: {enabled}")
-
-    @hmonitor.command(name="tune")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def tune_detection(self, ctx: commands.Context, category_name: str = None, limit: int = 10):
-        """Test detection on recent threads from a forum category to tune accuracy."""
-        categories = await self.config.guild(ctx.guild).forum_categories()
-
-        if category_name:
-            # Find specific category
-            category = next((cat for cat in categories if cat['name'].lower() == category_name.lower()), None)
-            if not category:
-                await ctx.send(
-                    f"Category '{category_name}' not found. Available categories: {', '.join(cat['name'] for cat in categories)}")
-                return
-            test_categories = [category]
-        else:
-            # Use first category if none specified
-            if not categories:
-                await ctx.send("No forum categories configured.")
-                return
-            test_categories = [categories[0]]
-
-        keywords = await self.config.guild(ctx.guild).keywords()
-        threshold = await self.config.guild(ctx.guild).threshold()
-        session = await self._get_session(ctx.guild)
-
-        try:
-            results = []
-
-            for category in test_categories:
-                threads = await self._get_recent_threads(session, category)
-
-                for i, thread in enumerate(threads[:limit]):
-                    if not thread['content']:
-                        thread['content'] = await self._get_thread_content(session, thread['url'])
-
-                    title = thread['title'] or ""
-                    body = thread['content'] or ""
-
-                    detect = self._match_score(title, body, keywords)
-                    would_notify = await self._should_notify(thread, detect, ctx.guild)
-
-                    results.append({
-                        "title": title[:50] + ("..." if len(title) > 50 else ""),
-                        "score": detect["score"],
-                        "notify": would_notify,
-                        "matches": sum(len(v) for v in detect["matches"].values())
-                    })
-
-            # Format results
-            msg = f"**Detection Test Results**\n```\n"
-            msg += f"{'Title':<52} {'Score':<6} {'Notify':<6} {'Matches'}\n"
-            msg += "-" * 75 + "\n"
-
-            for r in results:
-                notify_icon = "✓" if r["notify"] else "✗"
-                msg += f"{r['title']:<52} {r['score']:<6.1f} {notify_icon:<6} {r['matches']}\n"
-
-            msg += "```"
-
-            for page in pagify(msg):
-                await ctx.send(page)
-
-        except Exception as e:
-            await ctx.send(f"Error testing detection: {e}")
-
-    # Additional debugging commands
-    @hmonitor.command(name="taskinfo")
+    @hmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def taskinfo(self, ctx: commands.Context):
-        """Show detailed information about the monitoring task."""
+        """Show detailed task / session state."""
         task = self._tasks.get(ctx.guild.id)
-
         if not task:
-            await ctx.send("❌ No monitoring task exists for this guild.")
+            await ctx.send("❌ No task exists for this guild.")
             return
-
         lines = [
-            f"**Task Information for Guild {ctx.guild.id}**",
-            f"Task exists: ✅ Yes",
-            f"Task done: {'✅ Yes' if task.done() else '❌ No'}",
-            f"Task cancelled: {'✅ Yes' if task.cancelled() else '❌ No'}",
+            f"Task done: {'yes' if task.done() else 'no'}",
+            f"Task cancelled: {'yes' if task.cancelled() else 'no'}",
         ]
-
         if task.done():
             try:
-                exception = task.exception()
-                if exception:
-                    lines.append(f"Exception: {type(exception).__name__}: {exception}")
-                else:
-                    lines.append("Completed normally")
+                exc = task.exception()
+                lines.append(f"Exception: {type(exc).__name__}: {exc}" if exc else "Completed normally")
             except asyncio.InvalidStateError:
-                lines.append("Task state unknown")
-
-        # Show lock status
-        has_lock = ctx.guild.id in self._task_locks
-        lines.append(f"Has task lock: {'✅ Yes' if has_lock else '❌ No'}")
-
-        # Show session status
-        has_session = ctx.guild.id in self._sessions
-        lines.append(f"Has HTTP session: {'✅ Yes' if has_session else '❌ No'}")
-
+                lines.append("State unknown")
+        lines.append(f"Has session: {'yes' if ctx.guild.id in self._sessions else 'no'}")
         await ctx.send("\n".join(lines))
 
-    @hmonitor.command(name="cleartasks")
+    @hmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def debugmode(self, ctx: commands.Context, enabled: bool):
+        """Toggle debug mode (posts alive-pings when no matches are found)."""
+        await self.config.guild(ctx.guild).debug.set(enabled)
+        await ctx.send(f"Debug mode: `{enabled}`")
+
+    # ── Manual check / tuning ─────────────────────────────────────────────────
+    @hmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def checknow(self, ctx: commands.Context):
+        """Run one monitoring cycle immediately."""
+        cats = await self.config.guild(ctx.guild).forum_categories()
+        if not cats:
+            await ctx.send("❌ No forum categories configured.")
+            return
+        await ctx.send("🔍 Running check…")
+        try:
+            await self._check_categories(ctx.guild, cats)
+            await ctx.send("✅ Manual check done.")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+
+    @hmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def testdetect(self, ctx: commands.Context, *, text: str):
+        """Test detection on a title (and optional body after a newline).
+
+        Example:
+        ```
+        [p]hmonitor testdetect My sodium mod keeps crashing
+        java error in logs
+        ```
+        """
+        title, _, body = text.partition("\n")
+        kw     = await self.config.guild(ctx.guild).keywords()
+        detect = self._score_text(title.strip(), body.strip(), kw)
+        lines  = [
+            f"**Immediate**: {detect['immediate']}",
+            f"**Score**: {detect['score']}  (context boost: +{detect['context_boost']})",
+            "**Matches by tier:**",
+        ]
+        for tier, vals in detect["matches"].items():
+            lines.append(f"  {tier}: {', '.join(vals) if vals else '*(none)*'}")
+        if detect["breakdown"]:
+            lines.append("**Scoring breakdown:**")
+            for kw_name, (tier, pts) in list(detect["breakdown"].items())[:15]:
+                lines.append(f"  `{kw_name}` [{tier}] → {pts:+.1f}")
+        await ctx.send("\n".join(lines))
+
+    @hmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def tune(self, ctx: commands.Context, category_name: str = None, limit: int = 10):
+        """Run detection against recent threads to check accuracy.
+
+        Omit ``category_name`` to use the first configured category.
+        """
+        cats = await self.config.guild(ctx.guild).forum_categories()
+        if not cats:
+            await ctx.send("No categories configured.")
+            return
+
+        if category_name:
+            cat = next((c for c in cats if c["name"].lower() == category_name.lower()), None)
+            if not cat:
+                names = ", ".join(c["name"] for c in cats)
+                await ctx.send(f"Category not found. Available: {names}")
+                return
+            test_cats = [cat]
+        else:
+            test_cats = [cats[0]]
+
+        kw      = await self.config.guild(ctx.guild).keywords()
+        session = await self._get_session(ctx.guild)
+
+        await ctx.send(f"🔍 Fetching up to {limit} threads from **{test_cats[0]['name']}**…")
+
+        try:
+            rows = []
+            for cat in test_cats:
+                threads = await self._get_recent_threads(session, cat)
+                for thread in threads[:limit]:
+                    if not thread["content"]:
+                        thread["content"] = await self._get_thread_content(
+                            session, thread["url"]
+                        )
+                    detect = self._score_text(
+                        thread["title"], thread["content"], kw
+                    )
+                    would_notify = await self._should_notify(thread, detect, ctx.guild)
+                    top_kws = ", ".join(
+                        (detect["matches"].get("higher") or [])[:2] +
+                        (detect["matches"].get("normal") or [])[:3]
+                    ) or "—"
+                    rows.append((
+                        thread["title"][:48],
+                        detect["score"],
+                        "✓" if would_notify else "✗",
+                        top_kws[:30],
+                    ))
+
+            header = f"{'Title':<50} {'Score':<6} {'Notify':<7} Top keywords\n" + "─" * 85
+            body   = "\n".join(
+                f"{t:<50} {s:<6.1f} {n:<7} {k}" for t, s, n, k in rows
+            )
+            for page in pagify(f"```\n{header}\n{body}\n```"):
+                await ctx.send(page)
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
+
+    # ── Owner utilities ───────────────────────────────────────────────────────
+    @hmonitor.command()
     @commands.is_owner()
     async def cleartasks(self, ctx: commands.Context):
-        """[Owner Only] Clear all monitoring tasks and restart them."""
-        await ctx.send("🔄 Clearing all monitoring tasks...")
-
-        # Cancel all tasks
-        tasks_cancelled = 0
-        for guild_id, task in list(self._tasks.items()):
-            if not task.cancelled():
-                task.cancel()
-                tasks_cancelled += 1
-
-        # Wait for cancellation
-        if tasks_cancelled > 0:
-            await asyncio.sleep(2)
-
-        # Clean up all guild tasks
-        guilds_cleaned = len(self._tasks)
-        for guild_id in list(self._tasks.keys()):
-            await self._cleanup_guild_task(guild_id)
-
-        await ctx.send(f"✅ Cleared {tasks_cancelled} tasks and cleaned up {guilds_cleaned} guilds.")
-
-        # Restart tasks for enabled guilds
+        """[Owner] Cancel all tasks globally and restart for enabled guilds."""
+        cancelled = 0
+        for t in self._tasks.values():
+            if not t.cancelled():
+                t.cancel()
+                cancelled += 1
+        await asyncio.sleep(2)
+        for gid in list(self._tasks.keys()):
+            await self._cleanup(gid)
+        await ctx.send(f"Cancelled {cancelled} task(s). Restarting…")
         await self._startup_tasks()
-        await ctx.send("✅ Restarted monitoring tasks for enabled guilds.")
+        await ctx.send("✅ Tasks restarted for enabled guilds.")

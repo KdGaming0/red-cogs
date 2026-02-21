@@ -1,1029 +1,1112 @@
+"""
+RedditMonitor — RedBot cog
+Monitors configured subreddits for mod / tech-support posts and posts
+Discord embeds to a configured channel.
+
+Detection tiers
+  higher   → immediate notify regardless of threshold (VIP keywords, exact names)
+  normal   → +3.0 per phrase, +1.5 per single word  (title doubles these)
+  lower    → +1.5 per phrase, +0.5 per single word   (title doubles these)
+  negative → -2.5 per phrase, -1.0 per single word   (economy / trading terms)
+
+Context boost (+0.5 each, capped at +2.0): help-seeking language, tech terms, question marks.
+"""
+
 import asyncio
-import re
+import json
 import logging
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import asyncpraw
+import asyncpraw.models
 from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import pagify
 import discord
 
 LOGGER = logging.getLogger("red.redditmonitor")
 
-# Unique identifier for Config.get_conf. Change if you fork the cog.
-CONF_ID = 0x4a3b2c1d
+# ── Config identifier (change if you fork) ──────────────────────────────────
+CONF_ID = 0x4A3B2C1D
 
-# Default limits
+# ── Limits ───────────────────────────────────────────────────────────────────
 MIN_INTERVAL = 60
-DEFAULT_INTERVAL = 900
+DEFAULT_INTERVAL = 900       # 15 minutes
 DEFAULT_THRESHOLD = 3.0
 DEFAULT_MAX_PROCESSED = 1000
 
-DEFAULT_KEYWORDS = {
+# ── Default keyword lists ─────────────────────────────────────────────────────
+DEFAULT_KEYWORDS: Dict[str, List[str]] = {
+    # Immediate-trigger keywords (bypass threshold check entirely)
     "higher": [
-        # Special high-priority keywords that should trigger immediately
-        "skyblock enhanced", "sb enhanced", "kd_gaming1", "kdgaming1", "kdgaming", "packcore", "scale me", "scaleme"
+        "skyblock enhanced", "sb enhanced",
+        "kd_gaming1", "kdgaming1", "kdgaming",
+        "packcore", "scale me", "scaleme",
     ],
+
+    # Core signal keywords — scored highest
     "normal": [
-        # Core mod terms
-        "mod", "mods", "modpack", "modpacks", "forge", "fabric", "configs", "config", "1.21.5", "1.21.8",
+        # Mod tooling
+        "mod", "mods", "modpack", "modpacks",
+        "forge", "fabric",
+        "configs", "config",
+        "1.21.5", "1.21.8", "1.21.10", "1.21.11", "26.1", "26.2"
 
-        # 1.21+ Skyblock Mods
-        "firmament", "skyblock tweaks", "modern warp menu", "skyblockaddons unofficial",
-        "skyhanni", "hypixel mod api", "skyocean", "skyblock profile viewer", "bazaar utils",
-        "skyblocker", "cookies-mod", "aaron's mod", "custom scoreboard", "skycubed",
-        "nofrills", "nobaaddons", "sky cubed", "dulkirmod", "skyblock 21", "skycofl",
+        # 1.21+ SkyBlock mods
+        "firmament", "skyblock tweaks", "modern warp menu",
+        "skyblockaddons unofficial", "skyhanni", "hypixel mod api",
+        "skyocean", "skyblock profile viewer", "bazaar utils",
+        "skyblocker", "cookies-mod", "aaron's mod",
+        "custom scoreboard", "skycubed", "nofrills",
+        "nobaaddons", "sky cubed", "dulkirmod",
+        "skyblock 21", "skycofl",
 
-        # 1.8.9 Skyblock Mods
-        "notenoughupdates", "neu", "polysprint", "skyblockaddons", "sba", "polypatcher",
-        "hypixel plus", "furfsky", "dungeons guide", "skyguide", "partly sane skies",
+        # 1.8.9 SkyBlock mods
+        "notenoughupdates", "neu", "polysprint",
+        "skyblockaddons", "sba", "polypatcher",
+        "hypixel plus", "furfsky", "dungeons guide",
+        "skyguide", "partly sane skies",
         "secret routes mod", "skytils",
 
-        # Performance Mods
-        "more culling", "badoptimizations", "concurrent chunk management", "very many players",
-        "threadtweak", "scalablelux", "particle core", "sodium", "lithium", "iris",
+        # Performance mods
+        "more culling", "badoptimizations",
+        "concurrent chunk management", "very many players",
+        "threadtweak", "scalablelux", "particle core",
+        "sodium", "lithium", "iris",
         "entity culling", "ferritecore", "immediatelyfast",
 
-        # QoL Mods
-        "scrollable tooltips", "fzzy config", "no chat reports", "no resource pack warnings",
-        "auth me", "betterf3", "scale me", "packcore", "no double sneak", "centered crosshair",
-        "continuity", "3d skin layers", "wavey capes", "sound controller", "cubes without borders",
-        "sodium shadowy path blocks",
+        # QoL mods
+        "scrollable tooltips", "fzzy config",
+        "no chat reports", "no resource pack warnings",
+        "auth me", "betterf3", "no double sneak",
+        "centered crosshair", "continuity", "3d skin layers",
+        "wavey capes", "sound controller",
+        "cubes without borders", "sodium shadowy path blocks",
 
-        # Popular Clients/Launchers
-        "ladymod", "laby", "badlion", "lunar", "essential", "lunarclient", "client", "feather",
+        # Popular clients / launchers
+        "ladymod", "laby", "badlion", "lunar", "essential",
+        "lunarclient", "feather",
 
-        # Performance issues
-        "fps boost", "performance", "lag", "frames", "frame rate", "fps", "stuttering",
-        "freezing", "crash", "crashing", "memory", "ram", "cpu", "gpu", "graphics",
-        "low fps", "bad performance", "slow", "choppy", "frame drops",
+        # Performance / hardware problems
+        "fps boost", "fps drop", "frame drop",
+        "low fps", "bad performance", "stuttering",
+        "freezing", "crash", "crashing",
+        "memory leak", "high ram", "high cpu", "high gpu",
 
-        # PC/Technical problems
-        "pc problem", "computer issue", "technical issue", "troubleshoot", "fix",
-        "error", "bug", "glitch", "not working", "broken", "install", "installation",
-        "setup", "configure", "configuration", "compatibility", "java", "minecraft", "windows", "linux",
-
-        # Installation/setup
-        "install mod", "mod installation", "how to install", "mod setup"
+        # Technical issues
+        "not working", "won't launch", "won't open",
+        "install", "installation", "mod setup",
+        "how to install", "install mod",
+        "java error", "java crash",
+        "error", "bug", "glitch",
+        "compatibility issue",
     ],
+
+    # Weaker signal keywords
     "lower": [
-        # Technical terms
-        "modification", "skyblock addons", "not enough updates", "texture pack", "resource pack",
-        "shader", "shaders", "optifine", "optimization", "optimize",
-
-        # Modding terms
-        "modding", "modded", "loader", "api", "addon", "plugin",
-        "enhancement", "tweak", "utility", "tool", "helper"
+        "modification", "skyblock addons", "not enough updates",
+        "texture pack", "resource pack",
+        "shader", "shaders", "optifine",
+        "optimization", "optimize",
+        "modding", "modded", "loader",
+        "addon", "plugin",
+        "enhancement", "tweak", "utility",
+        "performance", "lag", "fix", "troubleshoot",
+        "setup", "configure", "configuration",
+        "java", "minecraft", "windows", "linux",
+        "ram", "cpu", "gpu", "graphics", "memory",
+        "frames", "fps",
     ],
+
+    # Penalise economy / game-content posts
     "negative": [
-        # Strong game content indicators
-        "minion", "coins", "dungeon master", "catacombs", "slayer", "dragon",
-        "auction house", "bazaar", "trading", "selling", "buying", "worth",
-        "price", "collection", "skill", "enchanting", "reforge", "talisman",
-        "accessory", "weapon", "armor", "pet", "farming coins", "money making"
-    ]
+        "minion", "coins", "dungeon master",
+        "catacombs", "slayer", "dragon",
+        "auction house", "bazaar", "trading",
+        "selling", "buying", "worth",
+        "price", "price check",
+        "collection", "skill level", "enchanting",
+        "reforge", "talisman", "accessory",
+        "weapon", "armor", "pet",
+        "farming coins", "money making",
+    ],
 }
 
+# Patterns that strongly suggest a false positive
+FALSE_POSITIVE_PATTERNS = [
+    re.compile(r'\b(selling|buying|trade|auction|price\s*check|worth)\b', re.I),
+    re.compile(r'\b(looking\s*for|want\s*to\s*buy|WTB|WTS)\b', re.I),
+    re.compile(r'\b(what.{0,20}worth|how\s+much|value)\b', re.I),
+    re.compile(r'\b(collection|skill).{0,30}\b(boost|farm)\b', re.I),
+]
 
+# Context patterns that raise confidence (+0.5 each, capped at +2.0)
+CONTEXT_PATTERNS = [
+    re.compile(r'\b(help|issue|problem|crash|fix|install|setup|configure)\b', re.I),
+    re.compile(r"\b(not\s+working|broken|won'?t\s+work|can'?t\s+get|having\s+trouble)\b", re.I),
+    re.compile(r'\b(fps|performance|lag|optimization|memory|ram|java)\b', re.I),
+    re.compile(r'\b(how\s+do\s+i|how\s+to|anyone\s+know|can\s+someone|need\s+help|please\s+help)\b', re.I),
+    re.compile(r'\?'),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 class RedditMonitor(commands.Cog):
-    """Monitor configured subreddits and post detected modding / tech-support posts to a Discord channel.
+    """Monitor subreddits for mod-related questions and technical help.
 
-    Detection uses keyword lists divided into higher (immediate), normal, lower, and negative.
+    Detection uses keyword tiers: higher (immediate), normal, lower, negative.
+    Run ``[p]rmonitor quicksetup #channel`` to get started.
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=CONF_ID, force_registration=True)
 
-        # Guild defaults
         default_guild = {
             "enabled": False,
             "reddit_client_id": None,
             "reddit_client_secret": None,
             "reddit_user_agent": None,
             "notify_channel_id": None,
-            "subreddits": [],  # list of subreddit names
+            "subreddits": [],
             "interval": DEFAULT_INTERVAL,
             "threshold": DEFAULT_THRESHOLD,
-            "keywords": {
-                "higher": [],
-                "normal": [],
-                "lower": [],
-                "negative": [],
-            },
+            "keywords": {"higher": [], "normal": [], "lower": [], "negative": []},
             "flair_filter": None,
             "processed_ids": [],
             "max_processed": DEFAULT_MAX_PROCESSED,
-            "timezone": None,
-            "default_debug": False,
+            "debug": False,
         }
-
         self.config.register_guild(**default_guild)
 
-        # runtime state - improved task management
-        self._tasks: Dict[int, asyncio.Task] = {}  # guild_id -> task
-        self._reddit_clients: Dict[int, asyncpraw.Reddit] = {}  # guild_id -> reddit instance
-        self._task_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> lock for task creation
-        self._global_lock = asyncio.Lock()
+        self._tasks:         Dict[int, asyncio.Task]      = {}
+        self._reddit_clients: Dict[int, asyncpraw.Reddit] = {}
+        self._task_locks:    Dict[int, asyncio.Lock]      = {}
+        # Per-guild lock for processed-ID writes (avoids a single global bottleneck)
+        self._proc_locks:    Dict[int, asyncio.Lock]      = {}
 
+    # ── Lifecycle ────────────────────────────────────────────────────────────
     async def cog_load(self) -> None:
-        """Start monitoring tasks for all enabled guilds when the cog loads."""
         await self._startup_tasks()
 
-    async def _startup_tasks(self):
-        """Start monitoring tasks for all guilds that have monitoring enabled."""
-        try:
-            all_guilds = await self.config.all_guilds()
-            for guild_id, guild_config in all_guilds.items():
-                if guild_config.get("enabled", False):
-                    guild = self.bot.get_guild(guild_id)
-                    if guild:
-                        await self._ensure_task(guild)
-                        LOGGER.info("Started monitoring task for guild %s on cog load", guild_id)
-        except Exception:
-            LOGGER.exception("Error during startup task creation")
-
     async def cog_unload(self) -> None:
-        """Clean shutdown of all monitoring tasks."""
-        LOGGER.info("Shutting down RedditMonitor cog...")
-
-        # Cancel all monitoring tasks
-        tasks_to_cancel = list(self._tasks.values())
-        for task in tasks_to_cancel:
-            if not task.cancelled():
-                task.cancel()
-
-        # Wait for tasks to finish cancelling
-        if tasks_to_cancel:
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-
+        LOGGER.info("Shutting down RedditMonitor…")
+        tasks = list(self._tasks.values())
+        for t in tasks:
+            if not t.cancelled():
+                t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
-
-        # Cleanup reddit clients
-        clients_to_close = list(self._reddit_clients.values())
-        for reddit in clients_to_close:
+        for reddit in self._reddit_clients.values():
             try:
                 await reddit.close()
             except Exception:
-                LOGGER.exception("Error closing reddit client")
-
+                pass
         self._reddit_clients.clear()
         self._task_locks.clear()
-        LOGGER.info("RedditMonitor cog shutdown complete")
+        self._proc_locks.clear()
 
-    # ------------------------- Helpers -------------------------
+    async def _startup_tasks(self):
+        try:
+            for guild_id, cfg in (await self.config.all_guilds()).items():
+                if cfg.get("enabled"):
+                    g = self.bot.get_guild(guild_id)
+                    if g:
+                        await self._ensure_task(g)
+        except Exception:
+            LOGGER.exception("Error during startup")
+
+    # ── Reddit client helper ──────────────────────────────────────────────────
     async def _get_reddit(self, guild: discord.Guild) -> Optional[asyncpraw.Reddit]:
-        """Get or create an asyncpraw Reddit instance for the guild using stored creds."""
-        creds = {
-            "client_id": await self.config.guild(guild).reddit_client_id(),
-            "client_secret": await self.config.guild(guild).reddit_client_secret(),
-            "user_agent": await self.config.guild(guild).reddit_user_agent(),
-        }
-        if not (creds["client_id"] and creds["client_secret"] and creds["user_agent"]):
-            return None
-
-        # create a reddit instance per guild if not exists
+        """Return a cached asyncpraw Reddit client for this guild, or None if unconfigured."""
         if guild.id in self._reddit_clients:
             return self._reddit_clients[guild.id]
 
+        cid    = await self.config.guild(guild).reddit_client_id()
+        secret = await self.config.guild(guild).reddit_client_secret()
+        ua     = await self.config.guild(guild).reddit_user_agent()
+
+        if not (cid and secret and ua):
+            return None
+
         try:
             reddit = asyncpraw.Reddit(
-                client_id=creds["client_id"],
-                client_secret=creds["client_secret"],
-                user_agent=creds["user_agent"],
+                client_id=cid, client_secret=secret, user_agent=ua
             )
             self._reddit_clients[guild.id] = reddit
             return reddit
         except Exception as e:
-            LOGGER.exception("Failed to create asyncpraw Reddit instance: %s", e)
+            LOGGER.exception("Reddit client creation failed: %s", e)
             return None
 
-    def _compile_patterns(self, patterns: List[str]) -> List[re.Pattern]:
-        compiled = []
-        for p in patterns:
-            try:
-                compiled.append(re.compile(p, re.IGNORECASE))
-            except re.error:
-                # fallback: escape as literal
-                compiled.append(re.compile(re.escape(p), re.IGNORECASE))
-        return compiled
+    # ── Detection ─────────────────────────────────────────────────────────────
+    @staticmethod
+    def _score_text(
+        title: str,
+        body: str,
+        keywords: Dict[str, List[str]],
+    ) -> Dict:
+        """
+        Score a post against keyword tiers.
 
-    def _match_score(self, title: str, body: str, keywords: dict) -> Dict:
-        """Enhanced detection with context scoring and phrase matching."""
+        Title hits are worth 2× their normal value.
+
+        Returns:
+            immediate (bool): True if any "higher" keyword matched.
+            score     (float): Aggregate relevance score.
+            matches   (dict):  {tier: [matched keywords]}
+            breakdown (dict):  keyword → (tier, points_awarded)
+        """
+        title_l  = title.lower()
+        body_l   = body.lower()
+        combined = f"{title_l}\n{body_l}"
+
+        matches   = {"higher": [], "normal": [], "lower": [], "negative": []}
+        breakdown = {}
+
+        # Body score, phrase / single-word weights per tier
+        # Title score = body score × 2.0
+        BODY_PHRASE  = {"higher": 0,    "normal": 3.0,  "lower": 1.5,  "negative": -2.5}
+        BODY_SINGLE  = {"higher": 0,    "normal": 1.5,  "lower": 0.5,  "negative": -1.0}
+        TITLE_MULT   = 2.0
+
         score = 0.0
-        matches = {"higher": [], "normal": [], "lower": [], "negative": []}
 
-        # Preprocess text
-        title_lower = title.lower()
-        body_lower = body.lower()
-        combined_text = f"{title_lower}\n{body_lower}"
-
-        # Context indicators that boost confidence
-        tech_context_patterns = [
-            r'\b(help|issue|problem|error|crash|fix|install|setup|configure)\b',
-            r'\b(not working|broken|won\'t work|can\'t get|having trouble)\b',
-            r'\b(fps|performance|lag|optimization|memory|ram)\b'
-        ]
-
-        context_boost = 0
-        for pattern in tech_context_patterns:
-            if re.search(pattern, combined_text):
-                context_boost += 0.5
-
-        # Enhanced matching with phrase detection
-        for level in ["higher", "normal", "lower", "negative"]:
-            level_keywords = keywords.get(level, [])
-
-            for keyword in level_keywords:
-                keyword_lower = keyword.lower()
-
-                # Exact phrase matching for multi-word keywords
-                if ' ' in keyword_lower:
-                    if keyword_lower in combined_text:
-                        matches[level].append(keyword)
-                        if level == "normal":
-                            score += 3.0  # Higher score for exact phrases
-                        elif level == "lower":
-                            score += 1.5
-                        elif level == "negative":
-                            score -= 2.5
+        for tier in ("higher", "normal", "lower", "negative"):
+            for kw in keywords.get(tier, []):
+                kw_l = kw.lower()
+                if " " in kw_l:
+                    in_title = kw_l in title_l
+                    in_body  = kw_l in body_l and not in_title
+                    if not (in_title or in_body):
+                        continue
+                    matches[tier].append(kw)
+                    base = BODY_PHRASE[tier]
+                    pts  = base * TITLE_MULT if in_title else base
+                    score += pts
+                    breakdown[kw] = (tier, pts)
                 else:
-                    # Word boundary matching for single words
-                    pattern = rf'\b{re.escape(keyword_lower)}\b'
-                    if re.search(pattern, combined_text):
-                        matches[level].append(keyword)
-                        if level == "normal":
-                            score += 2.0
-                        elif level == "lower":
-                            score += 1.0
-                        elif level == "negative":
-                            score -= 2.0
+                    pat      = rf'\b{re.escape(kw_l)}\b'
+                    in_title = bool(re.search(pat, title_l))
+                    in_body  = bool(re.search(pat, body_l)) and not in_title
+                    if not (in_title or in_body):
+                        continue
+                    matches[tier].append(kw)
+                    base = BODY_SINGLE[tier]
+                    pts  = base * TITLE_MULT if in_title else base
+                    score += pts
+                    breakdown[kw] = (tier, pts)
 
-        # Apply context boost only if we have positive matches
+        # Context boost (capped at +2.0)
+        context_boost = 0.0
         if matches["normal"] or matches["lower"]:
+            for cp in CONTEXT_PATTERNS:
+                if cp.search(combined):
+                    context_boost = min(context_boost + 0.5, 2.0)
             score += context_boost
 
-        # Title vs body weight (title matches are more important)
-        title_matches = sum(len(matches[lvl]) for lvl in ["normal", "lower"]
-                            if any(kw.lower() in title_lower for kw in matches[lvl]))
-        if title_matches > 0:
-            score += 1.0  # Bonus for title matches
-
         return {
-            "immediate": bool(matches["higher"]),
-            "score": score,
-            "matches": matches,
-            "context_boost": context_boost
+            "immediate":     bool(matches["higher"]),
+            "score":         round(score, 2),
+            "matches":       matches,
+            "context_boost": context_boost,
+            "breakdown":     breakdown,
         }
 
-    async def _should_notify(self, submission: asyncpraw.models.Submission, detect_info: dict,
-                             guild: discord.Guild) -> bool:
-        """Advanced filtering to reduce false positives."""
-
-        # Always notify for immediate matches
-        if detect_info["immediate"]:
+    async def _should_notify(
+        self,
+        submission: asyncpraw.models.Submission,
+        detect: dict,
+        guild: discord.Guild,
+    ) -> bool:
+        if detect["immediate"]:
             return True
 
-        # Check basic score threshold
         threshold = await self.config.guild(guild).threshold()
-        if detect_info["score"] < threshold:
+        if detect["score"] < threshold:
             return False
 
-        # Additional filters
-        title = submission.title.lower()
-        body = getattr(submission, "selftext", "").lower()
-
-        # Skip if too many negative indicators
-        negative_count = len(detect_info["matches"]["negative"])
-        positive_count = len(detect_info["matches"]["normal"]) + len(detect_info["matches"]["lower"])
-
-        if negative_count >= positive_count and negative_count > 2:
-            return False
-
-        # Skip common false positive patterns
-        false_positive_patterns = [
-            r'\b(selling|buying|trade|auction|price check|worth)\b',
-            r'\b(looking for|want to buy|WTB|WTS)\b',
-            r'\b(collection|skill|level|exp|xp)\b.*\b(boost|farm)\b',
-            r'\b(what.*worth|how much|value)\b'
-        ]
-
+        title    = submission.title.lower()
+        body     = getattr(submission, "selftext", "").lower()
         combined = f"{title} {body}"
-        for pattern in false_positive_patterns:
-            if re.search(pattern, combined, re.IGNORECASE):
+
+        neg = len(detect["matches"]["negative"])
+        pos = len(detect["matches"]["normal"]) + len(detect["matches"]["lower"])
+        if neg >= pos and neg > 2:
+            return False
+
+        for pat in FALSE_POSITIVE_PATTERNS:
+            if pat.search(combined):
                 return False
 
-        # Require stronger signals for borderline scores
-        if detect_info["score"] < threshold + 1.0:
-            # Need at least one strong keyword or good context
-            if not detect_info["matches"]["normal"] and detect_info.get("context_boost", 0) < 1.0:
+        if detect["score"] < threshold + 1.5:
+            if not detect["matches"]["normal"] and detect["context_boost"] < 1.0:
                 return False
 
         return True
 
-    async def _notify(self, guild: discord.Guild, submission: asyncpraw.models.Submission, detect_info: dict):
-        """Enhanced notification with confidence indicators."""
+    # ── Notification ──────────────────────────────────────────────────────────
+    async def _notify(
+        self,
+        guild: discord.Guild,
+        submission: asyncpraw.models.Submission,
+        detect: dict,
+    ):
         channel_id = await self.config.guild(guild).notify_channel_id()
         if not channel_id:
             return
-
         channel = guild.get_channel(channel_id)
         if not channel:
             return
 
-        title = submission.title
-        permalink = f"https://reddit.com{submission.permalink}"
+        score   = detect["score"]
         created = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
 
-        # Determine confidence level
-        score = detect_info.get("score", 0.0)
-        if detect_info["immediate"]:
-            confidence = "🔴 HIGH (Immediate)"
-            color = discord.Color.red()
-        elif score >= 5.0:
-            confidence = "🟠 HIGH"
-            color = discord.Color.orange()
+        if detect["immediate"]:
+            confidence, color = "🔴 HIGH (Immediate)", discord.Color.red()
+        elif score >= 6.0:
+            confidence, color = "🟠 HIGH",   discord.Color.orange()
         elif score >= 3.0:
-            confidence = "🟡 MEDIUM"
-            color = discord.Color.gold()
+            confidence, color = "🟡 MEDIUM", discord.Color.gold()
         else:
-            confidence = "🟢 LOW"
-            color = discord.Color.green()
+            confidence, color = "🟢 LOW",    discord.Color.green()
 
+        selftext = getattr(submission, "selftext", "") or ""
         embed = discord.Embed(
-            title=title[:256],
-            url=permalink,
-            description=(submission.selftext[:500] + "..." if len(submission.selftext) > 500 else submission.selftext),
+            title=(submission.title or "")[:256],
+            url=f"https://reddit.com{submission.permalink}",
+            description=(selftext[:500] + "…") if len(selftext) > 500 else selftext or "No text",
             color=color,
-            timestamp=created
+            timestamp=created,
         )
+        embed.add_field(name="Confidence", value=confidence,                         inline=True)
+        embed.add_field(name="Score",      value=f"{score:.1f}",                     inline=True)
+        embed.add_field(name="Subreddit",  value=f"r/{submission.subreddit.display_name}", inline=True)
 
-        embed.add_field(name="Confidence", value=confidence, inline=True)
-        embed.add_field(name="Score", value=f"{score:.1f}", inline=True)
-        embed.add_field(name="Subreddit", value=f"r/{submission.subreddit.display_name}", inline=True)
-
-        # Show only significant matches to reduce noise
-        matches = detect_info.get("matches", {})
-        for lvl in ("higher", "normal"):
-            vals = matches.get(lvl, [])
+        for tier in ("higher", "normal"):
+            vals = detect["matches"].get(tier, [])
             if vals:
                 embed.add_field(
-                    name=f"{lvl.title()} Keywords",
-                    value=", ".join(vals[:5]) + ("..." if len(vals) > 5 else ""),
-                    inline=False
+                    name=f"{tier.title()} Keywords",
+                    value=", ".join(vals[:6]) + ("…" if len(vals) > 6 else ""),
+                    inline=False,
                 )
-
-        # Show negative matches if they exist (for debugging)
-        if matches.get("negative"):
+        if detect["matches"].get("negative"):
             embed.add_field(
                 name="⚠️ Negative Indicators",
-                value=", ".join(matches["negative"][:3]),
-                inline=False
+                value=", ".join(detect["matches"]["negative"][:4]),
+                inline=False,
             )
 
         embed.set_footer(text=f"u/{submission.author} • {submission.id}")
-
         try:
             await channel.send(embed=embed)
         except Exception:
             LOGGER.exception("Failed to send notification")
 
+    # ── Processed-ID helpers ─────────────────────────────────────────────────
+    def _proc_lock(self, guild_id: int) -> asyncio.Lock:
+        if guild_id not in self._proc_locks:
+            self._proc_locks[guild_id] = asyncio.Lock()
+        return self._proc_locks[guild_id]
+
     async def _add_processed(self, guild: discord.Guild, post_id: str):
-        async with self._global_lock:
-            processed = await self.config.guild(guild).processed_ids()
+        async with self._proc_lock(guild.id):
+            processed = await self.config.guild(guild).processed_ids() or []
             maxp = await self.config.guild(guild).max_processed()
-            if processed is None:
-                processed = []
-            processed.append(post_id)
-            # keep most recent N
+            if post_id not in processed:
+                processed.append(post_id)
             if len(processed) > maxp:
                 processed = processed[-maxp:]
             await self.config.guild(guild).processed_ids.set(processed)
 
     async def _is_processed(self, guild: discord.Guild, post_id: str) -> bool:
         processed = await self.config.guild(guild).processed_ids()
-        return processed and post_id in processed
+        return bool(processed) and post_id in processed
 
-    async def _send_debug_message(self, guild: discord.Guild, message: str):
-        """Send debug message to the notification channel."""
-        debug_enabled = await self.config.guild(guild).default_debug()
-        if not debug_enabled:
+    # ── Debug helper ─────────────────────────────────────────────────────────
+    async def _debug(self, guild: discord.Guild, msg: str):
+        if not await self.config.guild(guild).debug():
             return
+        ch_id = await self.config.guild(guild).notify_channel_id()
+        if ch_id and (ch := guild.get_channel(ch_id)):
+            try:
+                await ch.send(msg)
+            except Exception:
+                pass
 
-        channel_id = await self.config.guild(guild).notify_channel_id()
-        if not channel_id:
-            return
-
-        channel = guild.get_channel(channel_id)
-        if not channel:
-            return
-
-        try:
-            await channel.send(message)
-        except Exception:
-            LOGGER.exception("Failed to send debug message")
-
-    # ------------------------- Monitoring Task -------------------------
+    # ── Monitoring loop ───────────────────────────────────────────────────────
     async def _monitor_guild(self, guild: discord.Guild):
-        """Main monitoring loop for a guild."""
-        LOGGER.info("Starting monitor for guild %s", guild.id)
-
+        LOGGER.info("Monitor started: guild %s", guild.id)
         try:
             reddit = await self._get_reddit(guild)
             if reddit is None:
-                LOGGER.warning("Guild %s has no reddit credentials configured; stopping monitor", guild.id)
+                LOGGER.warning("No Reddit credentials for guild %s — stopping", guild.id)
                 return
 
             while True:
                 try:
-                    # Check if monitoring is still enabled
-                    enabled = await self.config.guild(guild).enabled()
-                    if not enabled:
-                        LOGGER.info("Monitoring disabled for guild %s; stopping task", guild.id)
+                    if not await self.config.guild(guild).enabled():
+                        LOGGER.info("Monitoring disabled: guild %s", guild.id)
                         break
 
-                    # Get configuration
                     subs = await self.config.guild(guild).subreddits()
                     if not subs:
-                        LOGGER.debug("No subreddits configured for guild %s", guild.id)
-                        await self._send_debug_message(guild,
-                                                       "⚠️ Reddit monitor is alive but no subreddits are configured.")
+                        await self._debug(guild, "⚠️ Monitor alive — no subreddits configured.")
                     else:
-                        await self._monitor_subreddits(guild, reddit, subs)
+                        await self._check_subreddits(guild, reddit, subs)
 
-                    # Wait for next check
-                    interval = await self.config.guild(guild).interval()
-                    if not isinstance(interval, int) or interval < MIN_INTERVAL:
-                        interval = MIN_INTERVAL
-
-                    LOGGER.debug("Guild %s sleeping for %d seconds", guild.id, interval)
+                    interval = max(await self.config.guild(guild).interval(), MIN_INTERVAL)
                     await asyncio.sleep(interval)
 
                 except asyncio.CancelledError:
-                    LOGGER.info("Monitor task cancelled for guild %s", guild.id)
                     break
                 except Exception:
-                    LOGGER.exception("Error in monitoring loop for guild %s", guild.id)
-                    await self._send_debug_message(guild, "❌ Reddit monitor encountered an error. Retrying in 60s...")
+                    LOGGER.exception("Loop error: guild %s", guild.id)
+                    await self._debug(guild, "❌ Monitor error — retrying in 60 s…")
                     await asyncio.sleep(60)
 
         except asyncio.CancelledError:
-            LOGGER.info("Monitor task cancelled for guild %s", guild.id)
+            pass
         except Exception:
-            LOGGER.exception("Fatal error in monitor task for guild %s", guild.id)
+            LOGGER.exception("Fatal error: guild %s", guild.id)
         finally:
-            # Cleanup
-            await self._cleanup_guild_task(guild.id)
+            await self._cleanup(guild.id)
 
-    async def _monitor_subreddits(self, guild: discord.Guild, reddit: asyncpraw.Reddit, subreddits: List[str]):
-        """Monitor all configured subreddits for a guild."""
-        keywords = await self.config.guild(guild).keywords()
-        threshold = await self.config.guild(guild).threshold()
+    async def _check_subreddits(
+        self,
+        guild: discord.Guild,
+        reddit: asyncpraw.Reddit,
+        subreddits: List[str],
+    ):
+        keywords     = await self.config.guild(guild).keywords()
         flair_filter = await self.config.guild(guild).flair_filter()
-
-        found_any_match = False
-        total_posts_checked = 0
+        notified     = 0
+        checked      = 0
 
         for sub_name in subreddits:
             try:
-                subreddit = await reddit.subreddit(sub_name)
-                posts_checked = 0
-
-                async for submission in subreddit.new(limit=25):
-                    posts_checked += 1
-                    total_posts_checked += 1
-
-                    # Skip if already processed
+                sub = await reddit.subreddit(sub_name)
+                async for submission in sub.new(limit=25):
+                    checked += 1
                     if await self._is_processed(guild, submission.id):
                         continue
 
-                    # Apply flair filter if configured
+                    # Optional flair filter
                     if flair_filter:
-                        flair = getattr(submission, "link_flair_text", None)
-                        if not flair or flair_filter.lower() not in str(flair).lower():
+                        flair = getattr(submission, "link_flair_text", None) or ""
+                        if flair_filter.lower() not in flair.lower():
                             await self._add_processed(guild, submission.id)
                             continue
 
-                    # Analyze post content
-                    title = submission.title or ""
-                    body = getattr(submission, "selftext", "") or ""
-                    detect = self._match_score(title, body, keywords)
+                    title  = submission.title or ""
+                    body   = getattr(submission, "selftext", "") or ""
+                    detect = self._score_text(title, body, keywords)
 
-                    # Check if we should notify
-                    should_notify = await self._should_notify(submission, detect, guild)
-
-                    if should_notify:
-                        found_any_match = True
+                    if await self._should_notify(submission, detect, guild):
                         await self._notify(guild, submission, detect)
-                        LOGGER.info("Notified for post %s in r/%s for guild %s", submission.id, sub_name, guild.id)
+                        notified += 1
+                        LOGGER.info("Notified: %s in r/%s (guild %s)", submission.id, sub_name, guild.id)
 
-                    # Mark as processed regardless
                     await self._add_processed(guild, submission.id)
 
-                LOGGER.debug("Checked %d posts in r/%s for guild %s", posts_checked, sub_name, guild.id)
-
             except Exception:
-                LOGGER.exception("Error processing subreddit %s for guild %s", sub_name, guild.id)
+                LOGGER.exception("Subreddit error (%s): guild %s", sub_name, guild.id)
 
-        # Send debug message if no matches found and debug is enabled
-        if not found_any_match:
-            await self._send_debug_message(
+        if notified == 0:
+            await self._debug(
                 guild,
-                f"✅ Reddit monitor is alive. Checked {total_posts_checked} posts across {len(subreddits)} subreddit(s). No matching posts found this cycle."
+                f"✅ Monitor alive — checked {checked} posts across "
+                f"{len(subreddits)} subreddit(s). No matches this cycle.",
             )
 
-    async def _cleanup_guild_task(self, guild_id: int):
-        """Clean up resources for a guild's monitoring task."""
-        # Remove task from tracking
+    # ── Task management ───────────────────────────────────────────────────────
+    async def _cleanup(self, guild_id: int):
         self._tasks.pop(guild_id, None)
-
-        # Close reddit client
-        reddit_client = self._reddit_clients.pop(guild_id, None)
-        if reddit_client:
+        reddit = self._reddit_clients.pop(guild_id, None)
+        if reddit:
             try:
-                await reddit_client.close()
+                await reddit.close()
             except Exception:
-                LOGGER.exception("Error closing reddit client for guild %s", guild_id)
-
-        # Remove task lock
+                pass
         self._task_locks.pop(guild_id, None)
+        self._proc_locks.pop(guild_id, None)
 
-        LOGGER.info("Cleanup completed for guild %s", guild_id)
+    def _get_task_lock(self, guild_id: int) -> asyncio.Lock:
+        if guild_id not in self._task_locks:
+            self._task_locks[guild_id] = asyncio.Lock()
+        return self._task_locks[guild_id]
 
     async def _ensure_task(self, guild: discord.Guild):
-        """Ensure a monitoring task is running for a guild (thread-safe)."""
-        if guild.id not in self._task_locks:
-            self._task_locks[guild.id] = asyncio.Lock()
-
-        async with self._task_locks[guild.id]:
-            # Check if task already exists and is healthy
-            existing_task = self._tasks.get(guild.id)
-            if existing_task and not existing_task.done():
-                LOGGER.debug("Task already running for guild %s", guild.id)
+        async with self._get_task_lock(guild.id):
+            t = self._tasks.get(guild.id)
+            if t and not t.done():
                 return
-
-            # Clean up any done task
-            if existing_task:
-                LOGGER.info("Cleaning up completed task for guild %s", guild.id)
-                await self._cleanup_guild_task(guild.id)
-
-            # Check if monitoring is enabled
-            enabled = await self.config.guild(guild).enabled()
-            if not enabled:
-                LOGGER.debug("Monitoring disabled for guild %s, not starting task", guild.id)
+            if t:
+                await self._cleanup(guild.id)
+            if not await self.config.guild(guild).enabled():
                 return
-
-            # Create new task
-            LOGGER.info("Creating new monitoring task for guild %s", guild.id)
-            task = self.bot.loop.create_task(self._monitor_guild(guild))
-            self._tasks[guild.id] = task
+            self._tasks[guild.id] = self.bot.loop.create_task(
+                self._monitor_guild(guild)
+            )
 
     async def _stop_task(self, guild: discord.Guild):
-        """Stop monitoring task for a guild (thread-safe)."""
-        if guild.id not in self._task_locks:
-            return
-
-        async with self._task_locks[guild.id]:
-            task = self._tasks.get(guild.id)
-            if task and not task.cancelled():
-                LOGGER.info("Stopping monitoring task for guild %s", guild.id)
-                task.cancel()
+        async with self._get_task_lock(guild.id):
+            t = self._tasks.get(guild.id)
+            if t and not t.cancelled():
+                t.cancel()
                 try:
-                    await task
+                    await t
                 except asyncio.CancelledError:
                     pass
-            await self._cleanup_guild_task(guild.id)
+            await self._cleanup(guild.id)
 
-    # ------------------------- Commands -------------------------
-    @commands.group()
+    # ═════════════════════════════════════════════════════════════════════════
+    # Commands
+    # ═════════════════════════════════════════════════════════════════════════
+
+    @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def rmonitor(self, ctx: commands.Context):
-        """Reddit monitor commands. Use 'quicksetup' or 'loaddefaults' to get started quickly."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help()
+        """Reddit monitor. Start with ``quicksetup``, then ``setcreds``, then ``enable``.
 
-    @rmonitor.command(name="quicksetup")
+        **Quick start**
+        ```
+        [p]rmonitor quicksetup #channel
+        [p]rmonitor setcreds <id> <secret> MyBot/1.0
+        [p]rmonitor addsub HypixelSkyblock
+        [p]rmonitor enable
+        ```
+        """
+        await ctx.send_help()
+
+    # ── Setup ─────────────────────────────────────────────────────────────────
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def quicksetup(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Quick setup: set channel and load default keywords."""
+        """One-shot setup: set channel and load default keywords."""
         await self.config.guild(ctx.guild).notify_channel_id.set(channel.id)
         await self.config.guild(ctx.guild).keywords.set(deepcopy(DEFAULT_KEYWORDS))
+        await ctx.send(
+            f"✅ Quick setup complete!\n"
+            f"📢 Channel: {channel.mention}\n"
+            f"🔑 Default keywords loaded\n"
+            f"▶️  Next:\n"
+            f"• Set credentials: `{ctx.prefix}rmonitor setcreds <id> <secret> <user_agent>`\n"
+            f"• Add subreddits:  `{ctx.prefix}rmonitor addsub HypixelSkyblock`\n"
+            f"• Start:           `{ctx.prefix}rmonitor enable`"
+        )
 
-        await ctx.send(f"✅ Quick setup complete!\n"
-                       f"📢 Notification channel: {channel.mention}\n"
-                       f"🔑 Default keywords loaded\n"
-                       f"⚙️ Next steps:\n"
-                       f"• Add subreddits: `{ctx.prefix}rmonitor addsub minecraft`\n"
-                       f"• Set Reddit credentials: `{ctx.prefix}rmonitor setcreds <id> <secret> <user_agent>`\n"
-                       f"• Enable monitoring: `{ctx.prefix}rmonitor enable`")
-
-    # Credentials
-    @rmonitor.command(name="setcreds")
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
-    async def setcreds(self, ctx: commands.Context, client_id: str, client_secret: str, *, user_agent: str):
-        """Set Reddit API credentials for this guild. Keep these private."""
+    async def setcreds(
+        self,
+        ctx: commands.Context,
+        client_id: str,
+        client_secret: str,
+        *,
+        user_agent: str,
+    ):
+        """Set Reddit API credentials. Keep ``client_secret`` private."""
         await self.config.guild(ctx.guild).reddit_client_id.set(client_id)
         await self.config.guild(ctx.guild).reddit_client_secret.set(client_secret)
         await self.config.guild(ctx.guild).reddit_user_agent.set(user_agent)
-        await ctx.send("Reddit credentials saved. Do not share these publicly.")
+        # Invalidate cached client so it's recreated with new creds
+        old = self._reddit_clients.pop(ctx.guild.id, None)
+        if old:
+            try:
+                await old.close()
+            except Exception:
+                pass
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        await ctx.send("✅ Reddit credentials saved (message deleted for safety).")
 
-    @rmonitor.command(name="setchannel")
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where Reddit post notifications will be posted."""
+        """Set the notification channel."""
         await self.config.guild(ctx.guild).notify_channel_id.set(channel.id)
-        await ctx.send(f"Notification channel set to {channel.mention}")
+        await ctx.send(f"Notification channel set to {channel.mention}.")
 
-    # Subreddit management
-    @rmonitor.command(name="addsub")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def addsub(self, ctx: commands.Context, subreddit: str):
-        """Add a subreddit (name only, e.g. 'minecraft') to the monitored list."""
-        subreddit = subreddit.strip().lstrip("r/")
-        async with self.config.guild(ctx.guild).subreddits() as subs:
-            if subreddit in subs:
-                await ctx.send("That subreddit is already being monitored.")
-                return
-            subs.append(subreddit)
-        await ctx.send(f"Added subreddit: {subreddit}")
-
-    @rmonitor.command(name="remsub")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def remsub(self, ctx: commands.Context, subreddit: str):
-        subreddit = subreddit.strip().lstrip("r/")
-        async with self.config.guild(ctx.guild).subreddits() as subs:
-            if subreddit not in subs:
-                await ctx.send("That subreddit is not in the monitored list.")
-                return
-            subs.remove(subreddit)
-        await ctx.send(f"Removed subreddit: {subreddit}")
-
-    @rmonitor.command(name="listsubs")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def listsubs(self, ctx: commands.Context):
-        subs = await self.config.guild(ctx.guild).subreddits()
-        if not subs:
-            await ctx.send("No subreddits configured.")
-            return
-        msg = "Monitored subreddits:\n" + "\n".join(f"- {s}" for s in subs)
-        for page in pagify(msg):
-            await ctx.send(page)
-
-    # Enable / disable
-    @rmonitor.command(name="enable")
+    # ── Enable / disable ──────────────────────────────────────────────────────
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def enable(self, ctx: commands.Context):
-        """Enable monitoring for this guild."""
-        enabled = await self.config.guild(ctx.guild).enabled()
-        if enabled:
-            await ctx.send("Monitoring is already enabled. Use `!rmonitor disable` to turn off.")
+        """Start monitoring."""
+        if await self.config.guild(ctx.guild).enabled():
+            await ctx.send("Already enabled. Use `disable` to stop.")
             return
         await self.config.guild(ctx.guild).enabled.set(True)
-        await ctx.send("Monitoring enabled for this guild.")
         await self._ensure_task(ctx.guild)
+        await ctx.send("✅ Monitoring enabled.")
 
-    @rmonitor.command(name="disable")
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def disable(self, ctx: commands.Context):
-        """Disable monitoring for this guild."""
+        """Stop monitoring."""
         await self.config.guild(ctx.guild).enabled.set(False)
         await self._stop_task(ctx.guild)
-        await ctx.send("Monitoring disabled for this guild.")
+        await ctx.send("⏹ Monitoring disabled.")
 
-    # Interval and threshold
-    @rmonitor.command(name="setinterval")
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def restart(self, ctx: commands.Context):
+        """Restart the monitoring task."""
+        await self._stop_task(ctx.guild)
+        await asyncio.sleep(1)
+        await self._ensure_task(ctx.guild)
+        await ctx.send("♻️ Monitoring task restarted.")
+
+    # ── Interval / threshold ──────────────────────────────────────────────────
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def setinterval(self, ctx: commands.Context, seconds: int):
         """Set check interval in seconds (minimum 60)."""
         if seconds < MIN_INTERVAL:
-            await ctx.send(f"Interval must be at least {MIN_INTERVAL} seconds.")
+            await ctx.send(f"Minimum interval is {MIN_INTERVAL} s.")
             return
         await self.config.guild(ctx.guild).interval.set(seconds)
-        await ctx.send(f"Check interval set to {seconds} seconds.")
+        await ctx.send(f"Interval set to {seconds} s.")
 
-    @rmonitor.command(name="setthreshold")
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def setthreshold(self, ctx: commands.Context, threshold: float):
-        """Set detection threshold (float between 1.0 and 10.0)."""
-        if threshold < 1.0 or threshold > 10.0:
-            await ctx.send("Threshold must be between 1.0 and 10.0")
+        """Set detection threshold (1.0 – 10.0). Lower = more sensitive."""
+        if not 1.0 <= threshold <= 10.0:
+            await ctx.send("Threshold must be between 1.0 and 10.0.")
             return
         await self.config.guild(ctx.guild).threshold.set(threshold)
-        await ctx.send(f"Detection threshold set to {threshold}")
+        await ctx.send(f"Threshold set to {threshold}.")
 
-    # Keywords management
-    @rmonitor.group(name="keyword")
+    # ── Subreddits ────────────────────────────────────────────────────────────
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
-    async def keyword(self, ctx: commands.Context):
-        """Manage detection keywords. Subcommands: add/remove/list"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help()
-
-    @keyword.command(name="add")
-    async def keyword_add(self, ctx: commands.Context, level: str, *, pattern: str):
-        """Add a keyword/pattern to a level. Levels: higher, normal, lower, negative"""
-        level = level.lower()
-        if level not in ("higher", "normal", "lower", "negative"):
-            await ctx.send("Invalid level. Use higher, normal, lower, or negative.")
-            return
-        async with self.config.guild(ctx.guild).keywords() as kw:
-            kw[level].append(pattern)
-        await ctx.send(f"Added pattern to {level}: `{pattern}`")
-
-    @keyword.command(name="remove")
-    async def keyword_remove(self, ctx: commands.Context, level: str, *, pattern: str):
-        level = level.lower()
-        if level not in ("higher", "normal", "lower", "negative"):
-            await ctx.send("Invalid level. Use higher, normal, lower, or negative.")
-            return
-        async with self.config.guild(ctx.guild).keywords() as kw:
-            if pattern not in kw[level]:
-                await ctx.send("Pattern not found in that level.")
+    async def addsub(self, ctx: commands.Context, subreddit: str):
+        """Add a subreddit to monitor (name only, e.g. ``HypixelSkyblock``)."""
+        sub = subreddit.strip().lstrip("r/")
+        async with self.config.guild(ctx.guild).subreddits() as subs:
+            if sub in subs:
+                await ctx.send("Already monitoring that subreddit.")
                 return
-            kw[level].remove(pattern)
-        await ctx.send(f"Removed pattern from {level}: `{pattern}`")
+            subs.append(sub)
+        await ctx.send(f"Added: r/{sub}")
 
-    @keyword.command(name="list")
-    async def keyword_list(self, ctx: commands.Context):
-        kw = await self.config.guild(ctx.guild).keywords()
-        msg_lines = []
-        for lvl in ("higher", "normal", "lower", "negative"):
-            vals = kw.get(lvl, []) or []
-            msg_lines.append(f"{lvl.title()} ({len(vals)}):")
-            for v in vals:
-                msg_lines.append(f"  - {v}")
-        for page in pagify("\n".join(msg_lines)):
-            await ctx.send(page)
-
-    @rmonitor.command(name="loaddefaults")
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
-    async def loaddefaults(self, ctx: commands.Context, merge: bool = False):
-        """Load default keyword sets. Use 'true' as second argument to merge with existing keywords instead of replacing."""
-        if merge:
-            async with self.config.guild(ctx.guild).keywords() as kw:
-                for level, defaults in DEFAULT_KEYWORDS.items():
-                    existing = set(kw.get(level, []))
-                    new_keywords = existing.union(set(defaults))
-                    kw[level] = list(new_keywords)
-            await ctx.send("Default keywords merged with existing keywords.")
-        else:
-            await self.config.guild(ctx.guild).keywords.set(DEFAULT_KEYWORDS.copy())
-            await ctx.send("Default keywords loaded (existing keywords replaced).")
-
-        # Show summary
-        kw = await self.config.guild(ctx.guild).keywords()
-        summary = []
-        for level in ("higher", "normal", "lower", "negative"):
-            count = len(kw.get(level, []))
-            summary.append(f"{level}: {count}")
-
-        await ctx.send(f"Keyword counts: {', '.join(summary)}")
-
-    # Processed IDs / storage
-    @rmonitor.command(name="setmaxprocessed")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def setmaxprocessed(self, ctx: commands.Context, max_items: int):
-        """Set maximum number of processed reddit post IDs stored to control storage usage."""
-        if max_items < 10:
-            await ctx.send("max_processed must be at least 10")
-            return
-        await self.config.guild(ctx.guild).max_processed.set(max_items)
-        await ctx.send(f"max_processed set to {max_items}")
-
-    @rmonitor.command(name="processedcount")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def processedcount(self, ctx: commands.Context):
-        processed = await self.config.guild(ctx.guild).processed_ids()
-        cnt = len(processed) if processed else 0
-        await ctx.send(f"Stored processed post IDs: {cnt}")
-
-    # Manual checks and status
-    @rmonitor.command(name="checknow")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def checknow(self, ctx: commands.Context):
-        """Run a manual check now in this guild."""
-        await ctx.send("Running manual check...")
-
-        try:
-            # Get Reddit client
-            reddit = await self._get_reddit(ctx.guild)
-            if reddit is None:
-                await ctx.send("❌ Reddit credentials not configured.")
+    async def remsub(self, ctx: commands.Context, subreddit: str):
+        """Remove a subreddit from monitoring."""
+        sub = subreddit.strip().lstrip("r/")
+        async with self.config.guild(ctx.guild).subreddits() as subs:
+            if sub not in subs:
+                await ctx.send("That subreddit isn't in the list.")
                 return
+            subs.remove(sub)
+        await ctx.send(f"Removed: r/{sub}")
 
-            # Get configuration
-            subs = await self.config.guild(ctx.guild).subreddits()
-            if not subs:
-                await ctx.send("❌ No subreddits configured.")
-                return
-
-            # Run one monitoring cycle
-            await self._monitor_subreddits(ctx.guild, reddit, subs)
-            await ctx.send("✅ Manual check completed.")
-
-        except Exception as e:
-            LOGGER.exception("Error during manual check")
-            await ctx.send(f"❌ Error during manual check: {str(e)}")
-
-    @rmonitor.command(name="status")
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
-    async def status(self, ctx: commands.Context):
-        """Show current monitoring status and configuration for this guild."""
-        enabled = await self.config.guild(ctx.guild).enabled()
+    async def listsubs(self, ctx: commands.Context):
+        """List all monitored subreddits."""
         subs = await self.config.guild(ctx.guild).subreddits()
-        channel_id = await self.config.guild(ctx.guild).notify_channel_id()
-        interval = await self.config.guild(ctx.guild).interval()
-        threshold = await self.config.guild(ctx.guild).threshold()
-        maxp = await self.config.guild(ctx.guild).max_processed()
-        kw = await self.config.guild(ctx.guild).keywords()
-        debug = await self.config.guild(ctx.guild).default_debug()
+        if not subs:
+            await ctx.send("No subreddits configured.")
+            return
+        await ctx.send("**Monitored subreddits**\n" + "\n".join(f"• r/{s}" for s in subs))
 
-        # Check task status
-        task = self._tasks.get(ctx.guild.id)
-        if task and not task.done():
-            task_status = "🟢 Running"
-        elif task and task.done():
-            task_status = "🔴 Stopped (task completed/failed)"
-        else:
-            task_status = "🔴 Not running"
-
-        channel = ctx.guild.get_channel(channel_id) if channel_id else None
-        lines = [
-            f"**Reddit Monitor Status**",
-            f"Enabled: {enabled}",
-            f"Task Status: {task_status}",
-            f"Channel: {channel.mention if channel else 'Not set'}",
-            f"Subreddits: {', '.join(subs) if subs else 'None'}",
-            f"Interval: {interval}s",
-            f"Threshold: {threshold}",
-            f"Debug Mode: {debug}",
-            f"Max processed stored: {maxp}",
-            f"Keywords: higher={len(kw.get('higher') or [])}, normal={len(kw.get('normal') or [])}, lower={len(kw.get('lower') or [])}, negative={len(kw.get('negative') or [])}",
-        ]
-
-        # Add Reddit credentials status (without revealing them)
-        creds = await self.config.guild(ctx.guild).reddit_client_id()
-        creds_status = "✅ Configured" if creds else "❌ Not configured"
-        lines.append(f"Reddit API: {creds_status}")
-
-        await ctx.send("\n".join(lines))
-
-    @rmonitor.command(name="restart")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def restart(self, ctx: commands.Context):
-        """Restart the monitoring task for this guild."""
-        await ctx.send("Restarting monitoring task...")
-        await self._stop_task(ctx.guild)
-        await asyncio.sleep(1)  # Give it a moment to clean up
-        await self._ensure_task(ctx.guild)
-        await ctx.send("✅ Monitoring task restarted.")
-
-    # Flair / category
-    @rmonitor.command(name="setflair")
+    # ── Flair filter ──────────────────────────────────────────────────────────
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def setflair(self, ctx: commands.Context, *, flair: Optional[str] = None):
-        """Optionally set a flair text filter. Only posts with flair containing this text (case-insensitive) will be considered. Use blank to clear."""
-        if flair is None or flair.strip() == "":
-            await self.config.guild(ctx.guild).flair_filter.set(None)
-            await ctx.send("Cleared flair filter. Monitoring all flairs.")
-            return
-        await self.config.guild(ctx.guild).flair_filter.set(flair.strip())
-        await ctx.send(f"Set flair filter to: {flair.strip()}")
-
-    # Test detection
-    @rmonitor.command(name="testdetect")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def testdetect(self, ctx: commands.Context, *, title_and_body: str):
-        """Test the detection algorithm with a sample title (and optional body separated by '\n')."""
-        if "\n" in title_and_body:
-            title, body = title_and_body.split("\n", 1)
+        """Filter posts by flair text (case-insensitive substring). Leave blank to clear."""
+        flair = flair.strip() if flair else None
+        await self.config.guild(ctx.guild).flair_filter.set(flair)
+        if flair:
+            await ctx.send(f"Flair filter set to: `{flair}`")
         else:
-            title, body = title_and_body, ""
-        keywords = await self.config.guild(ctx.guild).keywords()
-        detect = self._match_score(title, body, keywords)
-        lines = [f"Immediate match: {detect['immediate']}", f"Score: {detect['score']}", "Matches:"]
-        for lvl, vals in detect["matches"].items():
-            lines.append(f"  {lvl}: {', '.join(vals) if vals else 'None'}")
+            await ctx.send("Flair filter cleared — all flairs will be checked.")
+
+    # ── Keywords ──────────────────────────────────────────────────────────────
+    @rmonitor.group(name="keyword", invoke_without_command=True)
+    @commands.admin_or_permissions(manage_guild=True)
+    async def keyword(self, ctx: commands.Context):
+        """Manage detection keywords.
+
+        Tiers: ``higher`` · ``normal`` · ``lower`` · ``negative``
+        """
+        await ctx.send_help()
+
+    @keyword.command(name="add")
+    async def keyword_add(self, ctx: commands.Context, tier: str, *, keyword: str):
+        """Add one keyword to a tier.
+
+        Example: ``[p]rmonitor keyword add normal skyhanni``
+        """
+        tier = tier.lower()
+        if tier not in ("higher", "normal", "lower", "negative"):
+            await ctx.send("Invalid tier. Use: `higher`, `normal`, `lower`, or `negative`.")
+            return
+        async with self.config.guild(ctx.guild).keywords() as kw:
+            if keyword in kw[tier]:
+                await ctx.send("That keyword is already in this tier.")
+                return
+            kw[tier].append(keyword)
+        await ctx.send(f"Added to **{tier}**: `{keyword}`")
+
+    @keyword.command(name="bulkadd")
+    async def keyword_bulkadd(self, ctx: commands.Context, tier: str, *, keywords: str):
+        """Add multiple comma-separated keywords at once.
+
+        Example: ``[p]rmonitor keyword bulkadd normal skyhanni, skyblocker, sodium``
+        """
+        tier = tier.lower()
+        if tier not in ("higher", "normal", "lower", "negative"):
+            await ctx.send("Invalid tier. Use: `higher`, `normal`, `lower`, or `negative`.")
+            return
+        new_kws = [k.strip() for k in keywords.split(",") if k.strip()]
+        if not new_kws:
+            await ctx.send("No keywords found — separate them with commas.")
+            return
+        added, skipped = [], []
+        async with self.config.guild(ctx.guild).keywords() as kw:
+            for nk in new_kws:
+                if nk in kw[tier]:
+                    skipped.append(nk)
+                else:
+                    kw[tier].append(nk)
+                    added.append(nk)
+        parts = []
+        if added:
+            parts.append(f"✅ Added ({len(added)}): {', '.join(f'`{k}`' for k in added)}")
+        if skipped:
+            parts.append(f"⏭ Already present ({len(skipped)}): {', '.join(f'`{k}`' for k in skipped)}")
+        await ctx.send("\n".join(parts))
+
+    @keyword.command(name="remove")
+    async def keyword_remove(self, ctx: commands.Context, tier: str, *, keyword: str):
+        """Remove a keyword from a tier."""
+        tier = tier.lower()
+        if tier not in ("higher", "normal", "lower", "negative"):
+            await ctx.send("Invalid tier. Use: `higher`, `normal`, `lower`, or `negative`.")
+            return
+        async with self.config.guild(ctx.guild).keywords() as kw:
+            if keyword not in kw[tier]:
+                await ctx.send("Keyword not found in that tier.")
+                return
+            kw[tier].remove(keyword)
+        await ctx.send(f"Removed from **{tier}**: `{keyword}`")
+
+    @keyword.command(name="list")
+    async def keyword_list(self, ctx: commands.Context, tier: str = "all"):
+        """List keywords. Optionally filter by tier.
+
+        Example: ``[p]rmonitor keyword list normal``
+        """
+        kw = await self.config.guild(ctx.guild).keywords()
+        tiers = ("higher", "normal", "lower", "negative") if tier == "all" \
+                else (tier.lower(),)
+        if any(t not in ("higher", "normal", "lower", "negative") for t in tiers):
+            await ctx.send("Invalid tier. Use: `higher`, `normal`, `lower`, `negative`, or `all`.")
+            return
+        lines = []
+        for t in tiers:
+            vals = kw.get(t, [])
+            lines.append(f"**{t.title()}** ({len(vals)})")
+            for v in vals:
+                lines.append(f"  • {v}")
+        for page in pagify("\n".join(lines)):
+            await ctx.send(page)
+
+    @keyword.command(name="find")
+    async def keyword_find(self, ctx: commands.Context, *, search: str):
+        """Search for a keyword across all tiers.
+
+        Example: ``[p]rmonitor keyword find sodium``
+        """
+        kw = await self.config.guild(ctx.guild).keywords()
+        search_l = search.lower()
+        found = [
+            f"**{tier}**: `{k}`"
+            for tier in ("higher", "normal", "lower", "negative")
+            for k in kw.get(tier, [])
+            if search_l in k.lower()
+        ]
+        await ctx.send("\n".join(found) if found else f"No keywords matching `{search}` found.")
+
+    @keyword.command(name="export")
+    async def keyword_export(self, ctx: commands.Context):
+        """Export current keywords as a JSON file."""
+        kw   = await self.config.guild(ctx.guild).keywords()
+        data = json.dumps(kw, indent=2)
+        fp   = discord.File(
+            fp=__import__("io").BytesIO(data.encode()),
+            filename="keywords.json",
+        )
+        await ctx.send("Current keywords:", file=fp)
+
+    @keyword.command(name="import")
+    async def keyword_import(self, ctx: commands.Context, merge: bool = False):
+        """Import keywords from an attached JSON file.
+
+        Pass ``true`` to merge instead of replace.
+        """
+        if not ctx.message.attachments:
+            await ctx.send("Attach a `.json` file exported by `keyword export`.")
+            return
+        att = ctx.message.attachments[0]
+        if not att.filename.endswith(".json"):
+            await ctx.send("Attachment must be a `.json` file.")
+            return
+        try:
+            raw  = await att.read()
+            data = json.loads(raw)
+        except Exception as e:
+            await ctx.send(f"Failed to parse JSON: {e}")
+            return
+
+        valid = ("higher", "normal", "lower", "negative")
+        if not all(k in valid for k in data):
+            await ctx.send("JSON must only contain keys: higher, normal, lower, negative.")
+            return
+
+        if merge:
+            async with self.config.guild(ctx.guild).keywords() as kw:
+                for tier, vals in data.items():
+                    kw[tier] = list(set(kw.get(tier, [])) | set(vals))
+            await ctx.send("✅ Keywords merged from file.")
+        else:
+            await self.config.guild(ctx.guild).keywords.set(data)
+            await ctx.send("✅ Keywords replaced from file.")
+
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def loaddefaults(self, ctx: commands.Context, merge: bool = False):
+        """(Re)load the built-in default keywords.
+
+        Pass ``true`` to merge with existing keywords instead of replacing.
+        """
+        if merge:
+            async with self.config.guild(ctx.guild).keywords() as kw:
+                for tier, defaults in DEFAULT_KEYWORDS.items():
+                    kw[tier] = list(set(kw.get(tier, [])) | set(defaults))
+            await ctx.send("Default keywords merged.")
+        else:
+            await self.config.guild(ctx.guild).keywords.set(deepcopy(DEFAULT_KEYWORDS))
+            await ctx.send("Default keywords loaded (previous keywords replaced).")
+
+        kw = await self.config.guild(ctx.guild).keywords()
+        counts = ", ".join(
+            f"{t}: {len(kw.get(t,[]))}" for t in ("higher","normal","lower","negative")
+        )
+        await ctx.send(f"Keyword counts — {counts}")
+
+    # ── Processed IDs ─────────────────────────────────────────────────────────
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def processedcount(self, ctx: commands.Context):
+        """Show how many post IDs are in the processed-IDs list."""
+        ids = await self.config.guild(ctx.guild).processed_ids()
+        await ctx.send(f"Stored processed IDs: {len(ids) if ids else 0}")
+
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def clearprocessed(self, ctx: commands.Context):
+        """Clear the processed-IDs list (will re-check all visible posts)."""
+        await self.config.guild(ctx.guild).processed_ids.set([])
+        await ctx.send("✅ Processed IDs cleared.")
+
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def setmaxprocessed(self, ctx: commands.Context, max_items: int):
+        """Cap the processed-ID list size (minimum 10)."""
+        if max_items < 10:
+            await ctx.send("Must be at least 10.")
+            return
+        await self.config.guild(ctx.guild).max_processed.set(max_items)
+        await ctx.send(f"Max processed IDs set to {max_items}.")
+
+    # ── Status / info ─────────────────────────────────────────────────────────
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def status(self, ctx: commands.Context):
+        """Show current configuration and task status."""
+        g     = ctx.guild
+        cfg   = self.config.guild(g)
+        en    = await cfg.enabled()
+        subs  = await cfg.subreddits()
+        ch_id = await cfg.notify_channel_id()
+        iv    = await cfg.interval()
+        thr   = await cfg.threshold()
+        maxp  = await cfg.max_processed()
+        kw    = await cfg.keywords()
+        dbg   = await cfg.debug()
+        ids   = await cfg.processed_ids()
+        flair = await cfg.flair_filter()
+        creds = await cfg.reddit_client_id()
+
+        task = self._tasks.get(g.id)
+        if task and not task.done():
+            task_st = "🟢 Running"
+        elif task:
+            task_st = "🔴 Stopped (task ended)"
+        else:
+            task_st = "🔴 Not running"
+
+        ch = g.get_channel(ch_id) if ch_id else None
+        await ctx.send(
+            f"**RedditMonitor Status**\n"
+            f"Enabled: `{en}` | Task: {task_st}\n"
+            f"Channel: {ch.mention if ch else '*(not set)*'}\n"
+            f"Subreddits: {', '.join(subs) if subs else '*(none)*'}\n"
+            f"Interval: {iv}s | Threshold: {thr} | Flair filter: `{flair or 'none'}`\n"
+            f"Debug: `{dbg}` | Processed IDs: {len(ids) if ids else 0}/{maxp}\n"
+            f"Reddit API: {'✅ Configured' if creds else '❌ Not configured'}\n"
+            f"Keywords — higher: {len(kw.get('higher',[]))}, "
+            f"normal: {len(kw.get('normal',[]))}, "
+            f"lower: {len(kw.get('lower',[]))}, "
+            f"negative: {len(kw.get('negative',[]))}"
+        )
+
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def taskinfo(self, ctx: commands.Context):
+        """Show detailed task / client state."""
+        task = self._tasks.get(ctx.guild.id)
+        if not task:
+            await ctx.send("❌ No task exists for this guild.")
+            return
+        lines = [
+            f"Task done: {'yes' if task.done() else 'no'}",
+            f"Task cancelled: {'yes' if task.cancelled() else 'no'}",
+        ]
+        if task.done():
+            try:
+                exc = task.exception()
+                lines.append(
+                    f"Exception: {type(exc).__name__}: {exc}" if exc else "Completed normally"
+                )
+            except asyncio.InvalidStateError:
+                lines.append("State unknown")
+        lines.append(f"Has Reddit client: {'yes' if ctx.guild.id in self._reddit_clients else 'no'}")
         await ctx.send("\n".join(lines))
 
-    @rmonitor.command(name="debugmode")
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
     async def debugmode(self, ctx: commands.Context, enabled: bool):
-        """Enable or disable debug mode (sends 'alive' messages when no matches found)."""
-        await self.config.guild(ctx.guild).default_debug.set(enabled)
-        await ctx.send(f"Debug mode set to: {enabled}")
+        """Toggle debug mode (posts alive-pings when no matches are found)."""
+        await self.config.guild(ctx.guild).debug.set(enabled)
+        await ctx.send(f"Debug mode: `{enabled}`")
 
-    @rmonitor.command(name="tune")
+    # ── Manual check / tuning ─────────────────────────────────────────────────
+    @rmonitor.command()
     @commands.admin_or_permissions(manage_guild=True)
-    async def tune_detection(self, ctx: commands.Context, subreddit: str, limit: int = 10):
-        """Test detection on recent posts from a subreddit to tune accuracy."""
+    async def checknow(self, ctx: commands.Context):
+        """Run one monitoring cycle immediately."""
+        reddit = await self._get_reddit(ctx.guild)
+        if reddit is None:
+            await ctx.send("❌ Reddit credentials not configured.")
+            return
+        subs = await self.config.guild(ctx.guild).subreddits()
+        if not subs:
+            await ctx.send("❌ No subreddits configured.")
+            return
+        await ctx.send("🔍 Running check…")
+        try:
+            await self._check_subreddits(ctx.guild, reddit, subs)
+            await ctx.send("✅ Manual check done.")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def testdetect(self, ctx: commands.Context, *, text: str):
+        """Test detection on a title (and optional body after a newline).
+
+        Example:
+        ```
+        [p]rmonitor testdetect My sodium mod keeps crashing
+        java error in logs
+        ```
+        """
+        title, _, body = text.partition("\n")
+        kw     = await self.config.guild(ctx.guild).keywords()
+        detect = self._score_text(title.strip(), body.strip(), kw)
+        lines  = [
+            f"**Immediate**: {detect['immediate']}",
+            f"**Score**: {detect['score']}  (context boost: +{detect['context_boost']})",
+            "**Matches by tier:**",
+        ]
+        for tier, vals in detect["matches"].items():
+            lines.append(f"  {tier}: {', '.join(vals) if vals else '*(none)*'}")
+        if detect["breakdown"]:
+            lines.append("**Scoring breakdown (first 15):**")
+            for kw_name, (tier, pts) in list(detect["breakdown"].items())[:15]:
+                lines.append(f"  `{kw_name}` [{tier}] → {pts:+.1f}")
+        await ctx.send("\n".join(lines))
+
+    @rmonitor.command()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def tune(self, ctx: commands.Context, subreddit: str, limit: int = 10):
+        """Run detection against recent posts to check accuracy.
+
+        Example: ``[p]rmonitor tune HypixelSkyblock 15``
+        """
         reddit = await self._get_reddit(ctx.guild)
         if not reddit:
             await ctx.send("Reddit credentials not configured.")
             return
 
-        keywords = await self.config.guild(ctx.guild).keywords()
-        threshold = await self.config.guild(ctx.guild).threshold()
+        kw  = await self.config.guild(ctx.guild).keywords()
+        sub = subreddit.strip().lstrip("r/")
+
+        await ctx.send(f"🔍 Fetching up to {limit} posts from r/{sub}…")
 
         try:
-            sub = await reddit.subreddit(subreddit.strip().lstrip("r/"))
-            results = []
-
-            async for submission in sub.new(limit=limit):
-                title = submission.title or ""
-                body = getattr(submission, "selftext", "") or ""
-
-                detect = self._match_score(title, body, keywords)
+            rows = []
+            sr   = await reddit.subreddit(sub)
+            async for submission in sr.new(limit=limit):
+                title  = submission.title or ""
+                body   = getattr(submission, "selftext", "") or ""
+                detect = self._score_text(title, body, kw)
                 would_notify = await self._should_notify(submission, detect, ctx.guild)
+                top_kws = ", ".join(
+                    (detect["matches"].get("higher") or [])[:2] +
+                    (detect["matches"].get("normal") or [])[:3]
+                ) or "—"
+                rows.append((
+                    title[:48],
+                    detect["score"],
+                    "✓" if would_notify else "✗",
+                    top_kws[:30],
+                ))
 
-                results.append({
-                    "title": title[:50] + ("..." if len(title) > 50 else ""),
-                    "score": detect["score"],
-                    "notify": would_notify,
-                    "matches": sum(len(v) for v in detect["matches"].values())
-                })
-
-            # Format results
-            msg = f"**Detection Test Results for r/{subreddit}**\n```\n"
-            msg += f"{'Title':<52} {'Score':<6} {'Notify':<6} {'Matches'}\n"
-            msg += "-" * 75 + "\n"
-
-            for r in results:
-                notify_icon = "✓" if r["notify"] else "✗"
-                msg += f"{r['title']:<52} {r['score']:<6.1f} {notify_icon:<6} {r['matches']}\n"
-
-            msg += "```"
-
-            for page in pagify(msg):
+            header = f"{'Title':<50} {'Score':<6} {'Notify':<7} Top keywords\n" + "─" * 85
+            body_t = "\n".join(
+                f"{t:<50} {s:<6.1f} {n:<7} {k}" for t, s, n, k in rows
+            )
+            for page in pagify(f"```\n{header}\n{body_t}\n```"):
                 await ctx.send(page)
-
         except Exception as e:
-            await ctx.send(f"Error testing detection: {e}")
+            await ctx.send(f"Error: {e}")
 
-    # Additional debugging commands
-    @rmonitor.command(name="taskinfo")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def taskinfo(self, ctx: commands.Context):
-        """Show detailed information about the monitoring task."""
-        task = self._tasks.get(ctx.guild.id)
-
-        if not task:
-            await ctx.send("❌ No monitoring task exists for this guild.")
-            return
-
-        lines = [
-            f"**Task Information for Guild {ctx.guild.id}**",
-            f"Task exists: ✅ Yes",
-            f"Task done: {'✅ Yes' if task.done() else '❌ No'}",
-            f"Task cancelled: {'✅ Yes' if task.cancelled() else '❌ No'}",
-        ]
-
-        if task.done():
-            try:
-                exception = task.exception()
-                if exception:
-                    lines.append(f"Exception: {type(exception).__name__}: {exception}")
-                else:
-                    lines.append("Completed normally")
-            except asyncio.InvalidStateError:
-                lines.append("Task state unknown")
-
-        # Show lock status
-        has_lock = ctx.guild.id in self._task_locks
-        lines.append(f"Has task lock: {'✅ Yes' if has_lock else '❌ No'}")
-
-        # Show reddit client status
-        has_reddit = ctx.guild.id in self._reddit_clients
-        lines.append(f"Has reddit client: {'✅ Yes' if has_reddit else '❌ No'}")
-
-        await ctx.send("\n".join(lines))
-
-    @rmonitor.command(name="cleartasks")
+    # ── Owner utilities ───────────────────────────────────────────────────────
+    @rmonitor.command()
     @commands.is_owner()
     async def cleartasks(self, ctx: commands.Context):
-        """[Owner Only] Clear all monitoring tasks and restart them."""
-        await ctx.send("🔄 Clearing all monitoring tasks...")
-
-        # Cancel all tasks
-        tasks_cancelled = 0
-        for guild_id, task in list(self._tasks.items()):
-            if not task.cancelled():
-                task.cancel()
-                tasks_cancelled += 1
-
-        # Wait for cancellation
-        if tasks_cancelled > 0:
-            await asyncio.sleep(2)
-
-        # Clean up all guild tasks
-        guilds_cleaned = len(self._tasks)
-        for guild_id in list(self._tasks.keys()):
-            await self._cleanup_guild_task(guild_id)
-
-        await ctx.send(f"✅ Cleared {tasks_cancelled} tasks and cleaned up {guilds_cleaned} guilds.")
-
-        # Restart tasks for enabled guilds
+        """[Owner] Cancel all tasks globally and restart for enabled guilds."""
+        cancelled = 0
+        for t in self._tasks.values():
+            if not t.cancelled():
+                t.cancel()
+                cancelled += 1
+        await asyncio.sleep(2)
+        for gid in list(self._tasks.keys()):
+            await self._cleanup(gid)
+        await ctx.send(f"Cancelled {cancelled} task(s). Restarting…")
         await self._startup_tasks()
-        await ctx.send("✅ Restarted monitoring tasks for enabled guilds.")
+        await ctx.send("✅ Tasks restarted for enabled guilds.")
