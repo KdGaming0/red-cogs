@@ -1,0 +1,12 @@
+{
+    "name": "NoDupeMessage",
+    "short": "Removes duplicate messages sent across multiple channels and mutes repeat offenders.",
+    "description": "Monitors messages guild-wide and removes any message a user sends in more than one channel within a configurable time window. Issues warnings and escalates to a Discord timeout after a configurable number of violations. Common short replies (yes, no, ok, thanks, etc.) are never flagged.",
+    "end_user_data_statement": "This cog stores no persistent user data. Violation counts are held in memory only and are cleared on bot restart.",
+    "hidden": false,
+    "disabled": false,
+    "min_bot_permissions": ["manage_messages", "moderate_members", "send_messages"],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": ["moderation", "filter", "anti-spam"]
+}
