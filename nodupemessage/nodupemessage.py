@@ -76,7 +76,7 @@ class NoDuppMessage(commands.Cog):
         stripped = content.lower().strip()
         return len(stripped) <= MIN_LENGTH or stripped in IGNORED_CONTENT
 
-    async def _temp_message(self, channel: discord.TextChannel, content: str, delay: int = 8):
+    async def _temp_message(self, channel: discord.TextChannel, content: str, delay: int = 30):
         """Send a message that auto-deletes after `delay` seconds."""
         try:
             msg = await channel.send(content)
