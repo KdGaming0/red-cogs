@@ -1,4 +1,5 @@
 import asyncio
+import json
 import aiohttp
 from datetime import datetime
 from typing import Optional
@@ -69,9 +70,9 @@ class ModrinthUpdateChecker(commands.Cog):
         """Fetch versions for a project, optionally filtered."""
         params = {"include_changelog": "true"}
         if loaders:
-            params["loaders"] = f'["{",".join(loaders)}"]'
+            params["loaders"] = json.dumps(loaders)
         if game_versions:
-            params["game_versions"] = f'["{",".join(game_versions)}"]'
+            params["game_versions"] = json.dumps(game_versions)
         try:
             async with self._session.get(
                 f"{MODRINTH_API}/project/{project_id}/version", params=params
@@ -176,6 +177,9 @@ class ModrinthUpdateChecker(commands.Cog):
 
             for project_id, entry in tracked.items():
                 await self._check_project(guild, project_id, entry, guild_default_loader)
+                fresh_tracked = await self.config.guild(guild).tracked()
+                if project_id in fresh_tracked:
+                    entry.update(fresh_tracked[project_id])
                 await asyncio.sleep(1)  # small delay between requests to be polite
 
     async def _check_project(self, guild: discord.Guild, project_id: str, entry: dict, guild_default_loader: Optional[str]):
