@@ -21,7 +21,7 @@ IGNORED_CONTENT = {
 MIN_LENGTH = 4
 
 
-class NoDuppMessage(commands.Cog):
+class NoDupeMessage(commands.Cog):
     """Detects and removes duplicate messages sent across multiple channels."""
 
     def __init__(self, bot):
