@@ -9,7 +9,7 @@ from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
 
 MODRINTH_API = "https://api.modrinth.com/v2"
-USER_AGENT = "RedBot-ModrinthUpdateChecker/1.0.0 (github.com/your_username/modrinthupdatechecker)"
+USER_AGENT = "RedBot-ModrinthUpdateChecker/1.0.0 (github.com/KdGaming0/red-cogs)"
 VERSION_URL = "https://modrinth.com/mod/{project_id}/version/{version_id}"
 
 VALID_LOADERS = {"fabric", "forge", "quilt", "neoforge", "liteloader", "modloader", "rift", "minecraft"}
@@ -24,7 +24,7 @@ class ModrinthUpdateChecker(commands.Cog):
 
         # Global defaults
         self.config.register_global(
-            check_interval=300,  # seconds (5 minutes)
+            check_interval=600,  # seconds (5 minutes)
             default_loader=None,  # e.g. "fabric"
         )
 
